@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Docs</title>
+    <link rel="stylesheet" href="styles.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="app">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="sidebar-brand">
+                <div class="brand-icon">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                        <polyline points="14 2 14 8 20 8"/>
+                    </svg>
+                </div>
+                <span class="brand-name">Docs</span>
+            </div>
+
+            <div class="sidebar-section">
+                <button class="sidebar-btn primary" id="openFileBtn">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="12" y1="5" x2="12" y2="19"/>
+                        <line x1="5" y1="12" x2="19" y2="12"/>
+                    </svg>
+                    Open PDF
+                </button>
+                <input type="file" id="fileInput" accept=".pdf" hidden>
+            </div>
+
+            <nav class="sidebar-nav">
+                <div class="nav-label">Document</div>
+                <button class="nav-item active" id="pagesNav">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="3" y="3" width="7" height="9" rx="1"/>
+                        <rect x="14" y="3" width="7" height="5" rx="1"/>
+                        <rect x="14" y="12" width="7" height="9" rx="1"/>
+                        <rect x="3" y="16" width="7" height="5" rx="1"/>
+                    </svg>
+                    Pages
+                    <span class="nav-badge" id="pageCount">0</span>
+                </button>
+                <button class="nav-item" id="notesNav">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 20h9"/>
+                        <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
+                    </svg>
+                    Annotations
+                    <span class="nav-badge" id="annotationCount">0</span>
+                </button>
+            </nav>
+
+            <div class="sidebar-pages" id="sidebarPages">
+                <div class="pages-empty">
+                    <p>No document loaded</p>
+                </div>
+            </div>
+
+            <div class="sidebar-footer">
+                <button class="footer-btn" id="themeToggle" title="Toggle theme">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="icon-sun">
+                        <circle cx="12" cy="12" r="5"/>
+                        <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
+                    </svg>
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="icon-moon" style="display:none">
+                        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+                    </svg>
+                </button>
+                <button class="footer-btn" id="shortcutsBtn" title="Keyboard shortcuts">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="2" y="4" width="20" height="16" rx="2"/>
+                        <path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M8 12h.01M12 12h.01M16 12h.01M7 16h10"/>
+                    </svg>
+                </button>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main">
+            <!-- Top Bar -->
+            <header class="topbar" id="topbar">
+                <div class="topbar-left">
+                    <button class="topbar-btn" id="sidebarToggle">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="3" y1="12" x2="21" y2="12"/>
+                            <line x1="3" y1="6" x2="21" y2="6"/>
+                            <line x1="3" y1="18" x2="21" y2="18"/>
+                        </svg>
+                    </button>
+                    <div class="doc-title" id="docTitle">Untitled Document</div>
+                </div>
+
+                <div class="topbar-center">
+                    <div class="page-nav">
+                        <button class="page-nav-btn" id="prevPage" disabled>
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                                <polyline points="15 18 9 12 15 6"/>
+                            </svg>
+                        </button>
+                        <span class="page-indicator">
+                            <input type="text" id="pageInput" value="1" class="page-input">
+                            <span class="page-sep">/</span>
+                            <span id="totalPages">1</span>
+                        </span>
+                        <button class="page-nav-btn" id="nextPage" disabled>
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                                <polyline points="9 18 15 12 9 6"/>
+                            </svg>
+                        </button>
+                    </div>
+
+                    <div class="divider"></div>
+
+                    <div class="zoom-controls">
+                        <button class="zoom-btn" id="zoomOut" disabled>
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                                <line x1="5" y1="12" x2="19" y2="12"/>
+                            </svg>
+                        </button>
+                        <span class="zoom-level" id="zoomLevel">100%</span>
+                        <button class="zoom-btn" id="zoomIn" disabled>
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                                <line x1="12" y1="5" x2="12" y2="19"/>
+                                <line x1="5" y1="12" x2="19" y2="12"/>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="topbar-right">
+                    <button class="topbar-btn" id="saveBtn" disabled title="Save annotations">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+                            <polyline points="17 21 17 13 7 13 7 21"/>
+                            <polyline points="7 3 7 8 15 8"/>
+                        </svg>
+                    </button>
+                    <button class="topbar-btn" id="loadBtn" disabled title="Load annotations">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                            <polyline points="7 10 12 15 17 10"/>
+                            <line x1="12" y1="15" x2="12" y2="3"/>
+                        </svg>
+                    </button>
+                    <input type="file" id="annotationInput" accept=".json" hidden>
+                </div>
+            </header>
+
+            <!-- Toolbar -->
+            <div class="toolbar" id="toolbar">
+                <div class="tool-group">
+                    <button class="tool-btn active" id="selectTool" data-tool="select" disabled>
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M3 3l7.07 16.97 2.51-7.39 7.39-2.51L3 3z"/>
+                        </svg>
+                        <span>Select</span>
+                    </button>
+                    <button class="tool-btn" id="highlightTool" data-tool="highlight" disabled>
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M12 20h9"/>
+                            <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
+                        </svg>
+                        <span>Highlight</span>
+                    </button>
+                    <button class="tool-btn" id="noteTool" data-tool="note" disabled>
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                        </svg>
+                        <span>Note</span>
+                    </button>
+                    <button class="tool-btn" id="drawTool" data-tool="draw" disabled>
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/>
+                        </svg>
+                        <span>Draw</span>
+                    </button>
+                </div>
+
+                <div class="color-picker" id="colorPicker">
+                    <button class="color-dot active" data-color="#fbbf24" style="--color: #fbbf24"></button>
+                    <button class="color-dot" data-color="#34d399" style="--color: #34d399"></button>
+                    <button class="color-dot" data-color="#60a5fa" style="--color: #60a5fa"></button>
+                    <button class="color-dot" data-color="#f472b6" style="--color: #f472b6"></button>
+                    <button class="color-dot" data-color="#a78bfa" style="--color: #a78bfa"></button>
+                </div>
+            </div>
+
+            <!-- Document Viewer -->
+            <div class="viewer" id="viewer">
+                <!-- Empty State -->
+                <div class="empty-state" id="emptyState">
+                    <div class="empty-icon">
+                        <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                            <polyline points="14 2 14 8 20 8"/>
+                            <line x1="12" y1="18" x2="12" y2="12"/>
+                            <line x1="9" y1="15" x2="15" y2="15"/>
+                        </svg>
+                    </div>
+                    <h2>Open a PDF to get started</h2>
+                    <p>Drag and drop a file here, or click the button below</p>
+                    <button class="empty-btn" id="emptyOpenBtn">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                            <polyline points="17 8 12 3 7 8"/>
+                            <line x1="12" y1="3" x2="12" y2="15"/>
+                        </svg>
+                        Choose File
+                    </button>
+                    <div class="empty-hint">
+                        <span class="key">Ctrl</span> + <span class="key">O</span> to open
+                    </div>
+                </div>
+
+                <!-- Loading State -->
+                <div class="loading-state" id="loadingState" style="display: none">
+                    <div class="loader"></div>
+                    <p>Loading document...</p>
+                </div>
+
+                <!-- Pages Container -->
+                <div class="pages" id="pagesContainer"></div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Note Editor -->
+    <div class="modal-overlay" id="noteModal" style="display: none">
+        <div class="note-modal">
+            <div class="note-header">
+                <h3>Edit Note</h3>
+                <button class="note-close" id="noteClose">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="18" y1="6" x2="6" y2="18"/>
+                        <line x1="6" y1="6" x2="18" y2="18"/>
+                    </svg>
+                </button>
+            </div>
+            <textarea class="note-textarea" id="noteText" placeholder="Write your thoughts..."></textarea>
+            <div class="note-footer">
+                <button class="note-btn delete" id="noteDelete">Delete</button>
+                <button class="note-btn save" id="noteSave">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Shortcuts Modal -->
+    <div class="modal-overlay" id="shortcutsModal" style="display: none">
+        <div class="shortcuts-modal">
+            <div class="shortcuts-header">
+                <h3>Keyboard Shortcuts</h3>
+                <button class="note-close" id="shortcutsClose">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="18" y1="6" x2="6" y2="18"/>
+                        <line x1="6" y1="6" x2="18" y2="18"/>
+                    </svg>
+                </button>
+            </div>
+            <div class="shortcuts-grid">
+                <div class="shortcut"><span class="keys"><span class="key">Ctrl</span><span class="key">O</span></span><span>Open file</span></div>
+                <div class="shortcut"><span class="keys"><span class="key">V</span></span><span>Select tool</span></div>
+                <div class="shortcut"><span class="keys"><span class="key">H</span></span><span>Highlight tool</span></div>
+                <div class="shortcut"><span class="keys"><span class="key">N</span></span><span>Note tool</span></div>
+                <div class="shortcut"><span class="keys"><span class="key">D</span></span><span>Draw tool</span></div>
+                <div class="shortcut"><span class="keys"><span class="key">←</span><span class="key">→</span></span><span>Navigate pages</span></div>
+                <div class="shortcut"><span class="keys"><span class="key">Ctrl</span><span class="key">+</span></span><span>Zoom in</span></div>
+                <div class="shortcut"><span class="keys"><span class="key">Ctrl</span><span class="key">-</span></span><span>Zoom out</span></div>
+                <div class="shortcut"><span class="keys"><span class="key">T</span></span><span>Toggle theme</span></div>
+                <div class="shortcut"><span class="keys"><span class="key">Esc</span></span><span>Close modal</span></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Container -->
+    <div class="toast-container" id="toasts"></div>
+
+    <script type="module" src="src/app.js"></script>
+</body>
+</html>

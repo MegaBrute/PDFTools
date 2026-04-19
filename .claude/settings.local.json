@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:mozilla.github.io)",
+      "Bash(dir \"C:\\\\Users\\\\micke\\\\PDFTools\")",
+      "Bash(npx serve:*)"
+    ]
+  }
+}
