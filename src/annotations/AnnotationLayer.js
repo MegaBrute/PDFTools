@@ -7,6 +7,8 @@
  * - Coordinates between different annotation tools
  */
 
+import { Highlighter } from './Highlighter.js';
+
 export class AnnotationLayer {
     constructor(pageWrapper, pageIndex, scale) {
         this.pageWrapper = pageWrapper;
@@ -19,6 +21,7 @@ export class AnnotationLayer {
         this.activeColor = '#FFEB3B';
         this.isDrawing = false;
         this.textPositions = [];
+        this.highlighter = new Highlighter();
 
         this.init();
     }
@@ -55,12 +58,13 @@ export class AnnotationLayer {
     // Set active tool
     setTool(tool) {
         this.activeTool = tool;
-        this.canvas.classList.toggle('active', tool !== null && tool !== 'select');
+        const isCanvasTool = tool === 'draw' || tool === 'note';
+        this.canvas.classList.toggle('active', isCanvasTool);
 
         // Update cursor
         switch (tool) {
             case 'highlight':
-                this.canvas.style.cursor = 'text';
+                this.canvas.style.cursor = 'default';
                 break;
             case 'note':
                 this.canvas.style.cursor = 'crosshair';
@@ -76,6 +80,7 @@ export class AnnotationLayer {
     // Set active color
     setColor(color) {
         this.activeColor = color;
+        this.highlighter.setColor(color);
     }
 
     // Handle mouse down
@@ -144,19 +149,18 @@ export class AnnotationLayer {
         this.isDrawing = false;
 
         if (this.activeTool === 'highlight') {
-            // Create highlight annotation
-            const highlight = {
-                type: 'highlight',
-                color: this.activeColor,
-                rect: {
-                    x: Math.min(this.startX, x),
-                    y: Math.min(this.startY, y),
-                    width: Math.abs(x - this.startX),
-                    height: Math.abs(y - this.startY)
-                },
-                pageIndex: this.pageIndex,
-                id: this.generateId()
-            };
+            const highlight = this.highlighter.createHighlightFromText(
+                this.textPositions,
+                this.startX,
+                this.startY,
+                x,
+                y,
+                this.scale
+            );
+
+            highlight.color = this.activeColor;
+            highlight.pageIndex = this.pageIndex;
+            highlight.id = this.generateId();
 
             if (highlight.rect.width > 5 && highlight.rect.height > 5) {
                 this.annotations.push(highlight);
@@ -229,9 +233,19 @@ export class AnnotationLayer {
                     return ann;
                 }
             } else if (ann.type === 'highlight') {
-                if (x >= ann.rect.x && x <= ann.rect.x + ann.rect.width &&
-                    y >= ann.rect.y && y <= ann.rect.y + ann.rect.height) {
-                    return ann;
+                const rects = ann.rects?.length ? ann.rects : [ann.rect];
+                for (const rect of rects) {
+                    if (x >= rect.x && x <= rect.x + rect.width &&
+                        y >= rect.y && y <= rect.y + rect.height) {
+                        return ann;
+                    }
+                }
+            } else if (ann.type === 'drawing') {
+                for (let j = 0; j < ann.path.length; j++) {
+                    const point = ann.path[j];
+                    if (Math.abs(point.x - x) <= 8 && Math.abs(point.y - y) <= 8) {
+                        return ann;
+                    }
                 }
             }
         }
@@ -240,55 +254,7 @@ export class AnnotationLayer {
 
     // Open note editor
     openNoteEditor(note) {
-        const editor = document.getElementById('noteEditor');
-        const textarea = document.getElementById('noteText');
-        const saveBtn = document.getElementById('saveNoteBtn');
-        const deleteBtn = document.getElementById('deleteNoteBtn');
-        const cancelBtn = document.getElementById('cancelNoteBtn');
-
-        textarea.value = note.text || '';
-
-        // Position editor near note
-        const pageRect = this.pageWrapper.getBoundingClientRect();
-        const scrollContainer = document.getElementById('viewerContainer');
-        const scrollRect = scrollContainer.getBoundingClientRect();
-
-        let left = pageRect.left + note.x + 20;
-        let top = pageRect.top + note.y - scrollRect.top + scrollContainer.scrollTop;
-
-        // Keep in bounds
-        if (left + 280 > window.innerWidth) {
-            left = pageRect.left + note.x - 300;
-        }
-
-        editor.style.left = left + 'px';
-        editor.style.top = top + 'px';
-        editor.style.display = 'block';
-
-        textarea.focus();
-
-        // Event handlers
-        const save = () => {
-            note.text = textarea.value;
-            this.dispatchAnnotationEvent('update', note);
-            close();
-        };
-
-        const deleteNote = () => {
-            this.removeAnnotation(note.id);
-            close();
-        };
-
-        const close = () => {
-            editor.style.display = 'none';
-            saveBtn.removeEventListener('click', save);
-            deleteBtn.removeEventListener('click', deleteNote);
-            cancelBtn.removeEventListener('click', close);
-        };
-
-        saveBtn.addEventListener('click', save);
-        deleteBtn.addEventListener('click', deleteNote);
-        cancelBtn.addEventListener('click', close);
+        window.app?.openNoteEditor(note);
     }
 
     // Generate unique ID
@@ -305,20 +271,56 @@ export class AnnotationLayer {
     }
 
     // Remove annotation
-    removeAnnotation(id) {
+    removeAnnotation(id, options = {}) {
         const index = this.annotations.findIndex(a => a.id === id);
         if (index !== -1) {
             const annotation = this.annotations[index];
             this.annotations.splice(index, 1);
-            this.dispatchAnnotationEvent('remove', annotation);
+            if (!options.silent) {
+                this.dispatchAnnotationEvent('remove', annotation);
+            }
             this.render();
+            return annotation;
         }
+
+        return null;
     }
 
     // Add annotation
-    addAnnotation(annotation) {
+    addAnnotation(annotation, options = {}) {
         this.annotations.push(annotation);
+        if (!options.silent) {
+            this.dispatchAnnotationEvent('add', annotation);
+        }
         this.render();
+    }
+
+    // Get annotation by ID
+    getAnnotation(id) {
+        return this.annotations.find(annotation => annotation.id === id) || null;
+    }
+
+    // Update annotation
+    updateAnnotation(annotation, options = {}) {
+        const index = this.annotations.findIndex(item => item.id === annotation.id);
+        if (index === -1) return null;
+
+        const previousAnnotation = this.annotations[index];
+        this.annotations[index] = annotation;
+
+        if (!options.silent) {
+            const event = new CustomEvent('annotationChange', {
+                detail: {
+                    action: 'update',
+                    annotation,
+                    previousAnnotation
+                }
+            });
+            document.dispatchEvent(event);
+        }
+
+        this.render();
+        return annotation;
     }
 
     // Get all annotations
@@ -354,7 +356,10 @@ export class AnnotationLayer {
     // Render highlight annotation
     renderHighlight(ann) {
         this.ctx.fillStyle = ann.color + '59'; // Add transparency
-        this.ctx.fillRect(ann.rect.x, ann.rect.y, ann.rect.width, ann.rect.height);
+        const rects = ann.rects?.length ? ann.rects : [ann.rect];
+        for (const rect of rects) {
+            this.ctx.fillRect(rect.x, rect.y, rect.width, rect.height);
+        }
     }
 
     // Render note annotation
@@ -429,6 +434,28 @@ export class AnnotationLayer {
 
     // Update scale
     setScale(scale) {
+        if (this.scale && this.scale !== scale) {
+            const factor = scale / this.scale;
+
+            for (const ann of this.annotations) {
+                if (ann.type === 'highlight') {
+                    ann.rect.x *= factor;
+                    ann.rect.y *= factor;
+                    ann.rect.width *= factor;
+                    ann.rect.height *= factor;
+                } else if (ann.type === 'note') {
+                    ann.x *= factor;
+                    ann.y *= factor;
+                } else if (ann.type === 'drawing') {
+                    ann.path = ann.path.map(point => ({
+                        x: point.x * factor,
+                        y: point.y * factor
+                    }));
+                }
+            }
+        }
+
         this.scale = scale;
+        this.render();
     }
 }

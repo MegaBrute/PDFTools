@@ -21,6 +21,7 @@ export class PDFParser {
         this.objectCache = new Map();
         this.xref = null;
         this.trailer = null;
+        this.fallbackXRefBuilt = false;
     }
 
     // Parse the PDF document
@@ -38,17 +39,15 @@ export class PDFParser {
         // Handle xref stream decompression if needed
         if (xrefParser.xrefStreamData) {
             const { data, W, Index, filter } = xrefParser.xrefStreamData;
-
-            if (filter) {
-                const decompressed = this.streamDecoder.decode(data, { Filter: filter });
-                xrefParser.parseXRefStreamData(decompressed, W, Index);
-                this.xref = xrefParser.xref;
-            }
+            const streamData = filter
+                ? await this.streamDecoder.decode(data, { Filter: filter })
+                : data;
+            xrefParser.parseXRefStreamData(streamData, W, Index);
+            this.xref = xrefParser.xref;
         }
 
         // Get document catalog
-        const rootRef = this.trailer.Root;
-        const catalog = await this.resolveRef(rootRef);
+        const catalog = await this.getCatalog();
 
         // Get page tree
         const pagesRef = ObjectParser.getDict(catalog).Pages;
@@ -79,7 +78,12 @@ export class PDFParser {
             return this.objectCache.get(cacheKey);
         }
 
-        const entry = this.xref.get(objNum);
+        let entry = this.xref.get(objNum);
+        if (!entry || !entry.inUse || (!entry.compressed && !this.isValidObjectHeader(entry.offset, objNum, entry.gen ?? genNum))) {
+            this.buildFallbackXRef();
+            entry = this.xref.get(objNum);
+        }
+
         if (!entry || !entry.inUse) {
             return null;
         }
@@ -91,15 +95,64 @@ export class PDFParser {
             obj = await this.getCompressedObject(entry.streamObjNum, entry.indexInStream);
         } else {
             // Regular object at file offset
-            obj = this.readObjectAt(entry.offset);
+            obj = await this.readObjectAt(entry.offset);
         }
 
         this.objectCache.set(cacheKey, obj);
         return obj;
     }
 
+    buildFallbackXRef() {
+        if (this.fallbackXRefBuilt) {
+            return;
+        }
+        this.fallbackXRefBuilt = true;
+
+        const text = new TextDecoder('latin1').decode(this.data);
+        const objectHeaderRegex = /(^|[\r\n])(\d+)\s+(\d+)\s+obj\b/gm;
+
+        let match;
+        while ((match = objectHeaderRegex.exec(text)) !== null) {
+            const objNum = parseInt(match[2], 10);
+            const gen = parseInt(match[3], 10);
+            const offset = match.index + match[1].length;
+            const existing = this.xref.get(objNum);
+
+            if (this.isValidObjectHeader(offset, objNum, gen)) {
+                const existingIsValid = existing &&
+                    !existing.compressed &&
+                    this.isValidObjectHeader(existing.offset, objNum, existing.gen);
+
+                if (!existingIsValid) {
+                    this.xref.set(objNum, { offset, gen, inUse: true, fallback: true });
+                }
+            }
+        }
+    }
+
+    isValidObjectHeader(offset, expectedObjNum, expectedGen) {
+        if (!Number.isInteger(offset) || offset < 0 || offset >= this.data.length) {
+            return false;
+        }
+
+        const tokenizer = new Tokenizer(this.data);
+        tokenizer.setPosition(offset);
+        const parser = new ObjectParser(tokenizer);
+
+        const objNumToken = parser.nextToken();
+        const genNumToken = parser.nextToken();
+        const objKeyword = parser.nextToken();
+
+        return objNumToken?.type === 'number' &&
+            Math.floor(objNumToken.value) === expectedObjNum &&
+            genNumToken?.type === 'number' &&
+            Math.floor(genNumToken.value) === expectedGen &&
+            objKeyword?.type === 'keyword' &&
+            objKeyword.value === 'obj';
+    }
+
     // Read object at file offset
-    readObjectAt(offset) {
+    async readObjectAt(offset) {
         this.tokenizer.setPosition(offset);
         const parser = new ObjectParser(this.tokenizer);
 
@@ -120,7 +173,7 @@ export class PDFParser {
         // Decode stream if present
         if (obj.type === 'stream') {
             try {
-                obj.decodedData = this.streamDecoder.decode(obj.data, obj.dict);
+                obj.decodedData = await this.streamDecoder.decode(obj.data, obj.dict);
             } catch (e) {
                 console.warn('Stream decode error:', e);
                 obj.decodedData = obj.data;
@@ -209,16 +262,43 @@ export class PDFParser {
 
     // Get all pages
     async getPages() {
-        const pagesRef = (await this.resolveRef(this.trailer.Root)).value.Pages;
-        const pagesDict = await this.resolveRef(pagesRef);
+        const catalog = await this.getCatalog();
+        const pagesRef = ObjectParser.getDict(catalog).Pages;
+        if (!pagesRef) {
+            throw new Error('PDF catalog is missing /Pages');
+        }
 
-        return this.flattenPageTree(pagesDict);
+        const pagesDict = await this.resolveRef(pagesRef);
+        if (!pagesDict) {
+            throw new Error('Could not resolve PDF page tree');
+        }
+
+        const pages = await this.flattenPageTree(pagesDict);
+        if (pages.length > 0) {
+            return pages;
+        }
+
+        return this.findPagesByScanningObjects();
+    }
+
+    async getCatalog() {
+        const rootRef = this.trailer?.Root;
+        if (!rootRef) {
+            throw new Error('PDF trailer is missing /Root');
+        }
+
+        const catalog = await this.resolveRef(rootRef);
+        if (!catalog) {
+            throw new Error('Could not resolve PDF catalog');
+        }
+
+        return catalog;
     }
 
     // Flatten page tree into array of page objects
     async flattenPageTree(node, inherited = {}) {
         const dict = ObjectParser.getDict(node);
-        const type = ObjectParser.getName(dict.Type);
+        const type = ObjectParser.getName(dict.Type) || this.inferPageNodeType(dict);
 
         // Inherit resources, mediabox, etc.
         const newInherited = { ...inherited };
@@ -228,14 +308,7 @@ export class PDFParser {
         if (dict.Rotate) newInherited.Rotate = dict.Rotate;
 
         if (type === 'Page') {
-            // Apply inherited properties
-            return [{
-                ...dict,
-                Resources: dict.Resources || newInherited.Resources,
-                MediaBox: dict.MediaBox || newInherited.MediaBox,
-                CropBox: dict.CropBox || newInherited.CropBox,
-                Rotate: dict.Rotate || newInherited.Rotate
-            }];
+            return [this.applyInheritedPageAttributes(dict, newInherited)];
         }
 
         if (type === 'Pages') {
@@ -252,6 +325,72 @@ export class PDFParser {
         }
 
         return [];
+    }
+
+    inferPageNodeType(dict) {
+        if (dict.Kids || dict.Count) {
+            return 'Pages';
+        }
+
+        if (dict.Parent || dict.Contents || dict.MediaBox || dict.CropBox) {
+            return 'Page';
+        }
+
+        return '';
+    }
+
+    applyInheritedPageAttributes(dict, inherited = {}) {
+        return {
+            ...dict,
+            Resources: dict.Resources || inherited.Resources,
+            MediaBox: dict.MediaBox || inherited.MediaBox,
+            CropBox: dict.CropBox || inherited.CropBox,
+            Rotate: dict.Rotate || inherited.Rotate
+        };
+    }
+
+    async findPagesByScanningObjects() {
+        const pages = [];
+        const objectNumbers = [...this.xref.keys()].sort((a, b) => a - b);
+
+        for (const objNum of objectNumbers) {
+            const obj = await this.getObject(objNum);
+            const dict = ObjectParser.getDict(obj);
+            const type = ObjectParser.getName(dict.Type);
+
+            if (type !== 'Page') {
+                continue;
+            }
+
+            const inherited = await this.getInheritedPageAttributes(dict);
+            pages.push(this.applyInheritedPageAttributes(dict, inherited));
+        }
+
+        return pages;
+    }
+
+    async getInheritedPageAttributes(dict) {
+        const inherited = {};
+        let parentRef = dict.Parent;
+        let depth = 0;
+
+        while (parentRef && depth < 50) {
+            const parent = await this.resolveRef(parentRef);
+            const parentDict = ObjectParser.getDict(parent);
+            if (!parentDict || Object.keys(parentDict).length === 0) {
+                break;
+            }
+
+            if (!inherited.Resources && parentDict.Resources) inherited.Resources = parentDict.Resources;
+            if (!inherited.MediaBox && parentDict.MediaBox) inherited.MediaBox = parentDict.MediaBox;
+            if (!inherited.CropBox && parentDict.CropBox) inherited.CropBox = parentDict.CropBox;
+            if (!inherited.Rotate && parentDict.Rotate) inherited.Rotate = parentDict.Rotate;
+
+            parentRef = parentDict.Parent;
+            depth++;
+        }
+
+        return inherited;
     }
 
     // Get page content stream(s)

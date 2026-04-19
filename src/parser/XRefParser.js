@@ -27,10 +27,9 @@ export class XRefParser {
             throw new Error('Could not find startxref');
         }
 
-        // Read xref offset
-        this.tokenizer.setPosition(startxrefPos);
-        this.tokenizer.readLine(); // skip "startxref"
-        const xrefOffset = parseInt(this.tokenizer.readLine().trim(), 10);
+        // Read the numeric offset token that follows "startxref".
+        // Real PDFs sometimes include extra whitespace or non-standard line breaks here.
+        const xrefOffset = this.readStartXRefOffset(startxrefPos);
 
         // Parse xref (could be table or stream)
         this.parseXRefAt(xrefOffset);
@@ -47,9 +46,23 @@ export class XRefParser {
         return this.tokenizer.findReverse(startxrefBytes);
     }
 
+    readStartXRefOffset(startxrefPos) {
+        const keywordLength = 'startxref'.length;
+        this.tokenizer.setPosition(startxrefPos + keywordLength);
+        this.tokenizer.skipWhitespaceAndComments();
+
+        const token = this.tokenizer.nextToken();
+        if (!token || token.type !== 'number' || !Number.isFinite(token.value)) {
+            throw new Error('Could not read startxref offset');
+        }
+
+        return Math.floor(token.value);
+    }
+
     // Parse xref at given offset
     parseXRefAt(offset) {
-        this.tokenizer.setPosition(offset);
+        const resolvedOffset = this.findNearestXRefOffset(offset);
+        this.tokenizer.setPosition(resolvedOffset);
         this.tokenizer.skipWhitespaceAndComments();
 
         // Check if it's traditional xref or xref stream
@@ -59,7 +72,7 @@ export class XRefParser {
             this.parseTraditionalXRef();
         } else {
             // It's an xref stream (object number)
-            this.tokenizer.setPosition(offset);
+            this.tokenizer.setPosition(resolvedOffset);
             this.parseXRefStream();
         }
 
@@ -70,6 +83,54 @@ export class XRefParser {
                 this.parseXRefAt(prevOffset);
             }
         }
+    }
+
+    findNearestXRefOffset(offset) {
+        if (!Number.isInteger(offset) || offset < 0 || offset >= this.data.length) {
+            throw new Error(`Invalid xref offset: ${offset}`);
+        }
+
+        const direct = this.classifyXRefOffset(offset);
+        if (direct) {
+            return offset;
+        }
+
+        // Some PDFs provide an offset that lands a few bytes away from the actual
+        // xref header/object. Search a small local window before giving up.
+        const windowStart = Math.max(0, offset - 64);
+        const windowEnd = Math.min(this.data.length - 1, offset + 64);
+
+        for (let candidate = windowStart; candidate <= windowEnd; candidate++) {
+            if (this.classifyXRefOffset(candidate)) {
+                return candidate;
+            }
+        }
+
+        return offset;
+    }
+
+    classifyXRefOffset(offset) {
+        this.tokenizer.setPosition(offset);
+        this.tokenizer.skipWhitespaceAndComments();
+
+        const probePos = this.tokenizer.getPosition();
+        const word = this.tokenizer.readRegularChars();
+
+        if (word === 'xref') {
+            return 'table';
+        }
+
+        this.tokenizer.setPosition(probePos);
+        const first = this.tokenizer.nextToken();
+        const second = this.tokenizer.nextToken();
+        const third = this.tokenizer.nextToken();
+
+        if (first?.type === 'number' && second?.type === 'number' &&
+            third?.type === 'keyword' && third.value === 'obj') {
+            return 'stream';
+        }
+
+        return null;
     }
 
     // Parse traditional xref table

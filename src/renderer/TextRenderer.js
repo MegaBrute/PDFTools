@@ -17,6 +17,8 @@ export class TextRenderer {
         this.textPositions = []; // For annotation support
         this.currentFont = null;
         this.currentFontSize = 12;
+        this.currentCssFont = '12px sans-serif';
+        this.pageMetrics = { width: 0, height: 0, x1: 0, y1: 0 };
     }
 
     // Reset for new page
@@ -27,6 +29,10 @@ export class TextRenderer {
     // Get recorded text positions
     getTextPositions() {
         return this.textPositions;
+    }
+
+    setPageMetrics(metrics) {
+        this.pageMetrics = metrics;
     }
 
     // Set the current font
@@ -47,6 +53,7 @@ export class TextRenderer {
 
         // Map PDF font to canvas font
         const cssFont = this.mapFontToCSS(fontName, fontSize);
+        this.currentCssFont = cssFont;
         ctx.font = cssFont;
     }
 
@@ -155,6 +162,19 @@ export class TextRenderer {
                     mapping[i] = String.fromCodePoint(dst++);
                 }
             }
+
+            const lines = section.split(/\r?\n/);
+            for (const line of lines) {
+                const arrayMatch = line.match(/<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*\[(.+)\]/);
+                if (!arrayMatch) continue;
+
+                const start = parseInt(arrayMatch[1], 16);
+                const values = [...arrayMatch[3].matchAll(/<([0-9A-Fa-f]+)>/g)].map(m => m[1]);
+
+                for (let i = 0; i < values.length; i++) {
+                    mapping[start + i] = this.hexToString(values[i]);
+                }
+            }
         }
 
         return mapping;
@@ -261,10 +281,34 @@ export class TextRenderer {
 
         // Use ToUnicode mapping if available
         if (this.currentFont && this.currentFont.toUnicode) {
+            if (this.usesTwoByteCharCodes(bytes)) {
+                let result = '';
+                for (let i = 0; i < bytes.length; i += 2) {
+                    const code = (bytes[i] << 8) | (bytes[i + 1] ?? 0);
+                    const mapped = this.currentFont.toUnicode[code];
+                    if (mapped) {
+                        result += mapped;
+                    } else {
+                        result += String.fromCharCode(code);
+                    }
+                }
+                return result;
+            }
+
             let result = '';
             for (const byte of bytes) {
                 const mapped = this.currentFont.toUnicode[byte];
                 result += mapped || String.fromCharCode(byte);
+            }
+            return result;
+        }
+
+        // Common PDF text case: UTF-16BE-like hex strings without an explicit BOM.
+        if (this.looksLikeUtf16BE(bytes)) {
+            let result = '';
+            for (let i = 0; i < bytes.length; i += 2) {
+                const code = (bytes[i] << 8) | (bytes[i + 1] ?? 0);
+                result += String.fromCharCode(code);
             }
             return result;
         }
@@ -275,6 +319,33 @@ export class TextRenderer {
             result += this.decodeChar(byte);
         }
         return result;
+    }
+
+    usesTwoByteCharCodes(bytes) {
+        if (!this.currentFont || bytes.length < 2 || bytes.length % 2 !== 0) {
+            return false;
+        }
+
+        if (this.currentFont.encoding?.startsWith('Identity-') || this.currentFont.subtype === 'Type0') {
+            return true;
+        }
+
+        return Object.keys(this.currentFont.toUnicode || {}).some(key => Number(key) > 0xFF);
+    }
+
+    looksLikeUtf16BE(bytes) {
+        if (bytes.length < 2 || bytes.length % 2 !== 0) {
+            return false;
+        }
+
+        let zeroCount = 0;
+        for (let i = 0; i < bytes.length; i += 2) {
+            if (bytes[i] === 0) {
+                zeroCount++;
+            }
+        }
+
+        return zeroCount >= bytes.length / 4;
     }
 
     // Decode a single character
@@ -311,7 +382,8 @@ export class TextRenderer {
             'asciicircum': '^', 'underscore': '_', 'grave': '`',
             'braceleft': '{', 'bar': '|', 'braceright': '}', 'asciitilde': '~',
             'bullet': '•', 'endash': '–', 'emdash': '—',
-            'quoteleft': ''', 'quoteright': ''', 'quotedblleft': '"', 'quotedblright': '"',
+            'quoteleft': "'", 'quoteright': "'", 'quotedblleft': '"', 'quotedblright': '"',
+            'lenis': '’', 'asper': '‘',
             'fi': 'fi', 'fl': 'fl'
         };
 
@@ -322,6 +394,27 @@ export class TextRenderer {
         // Letter names (A-Z, a-z)
         if (name.length === 1) {
             return name;
+        }
+
+        const smallCapMatch = name.match(/^([A-Za-z])small$/);
+        if (smallCapMatch) {
+            return smallCapMatch[1].toLowerCase();
+        }
+
+        const oldStyleDigits = {
+            zerooldstyle: '0',
+            oneoldstyle: '1',
+            twooldstyle: '2',
+            threeoldstyle: '3',
+            fouroldstyle: '4',
+            fiveoldstyle: '5',
+            sixoldstyle: '6',
+            sevenoldstyle: '7',
+            eightoldstyle: '8',
+            nineoldstyle: '9'
+        };
+        if (oldStyleDigits[name]) {
+            return oldStyleDigits[name];
         }
 
         // Unicode value: uniXXXX
@@ -366,17 +459,33 @@ export class TextRenderer {
 
         ctx.restore();
 
-        // Record text position for annotations
-        const width = ctx.measureText(text).width;
-        const scaledWidth = width * Math.abs(tm[0]);
+        const effectiveMatrix = this.multiplyMatrix(
+            state.ctm || [1, 0, 0, 1, 0, 0],
+            this.multiplyMatrix(tm, [1, 0, 0, -1, 0, 0])
+        );
+        const scaleX = Math.hypot(effectiveMatrix[0], effectiveMatrix[1]) || 1;
+        const scaleY = Math.hypot(effectiveMatrix[2], effectiveMatrix[3]) || 1;
+        const metrics = ctx.measureText(text);
+        const ascent = metrics.actualBoundingBoxAscent || fontSize * 0.8;
+        const descent = metrics.actualBoundingBoxDescent || fontSize * 0.2;
+        const width = metrics.width;
+        const pageX = effectiveMatrix[4] - this.pageMetrics.x1;
+        const pageTop = (this.pageMetrics.height + this.pageMetrics.y1) -
+            (effectiveMatrix[5] + ascent * scaleY);
+        const boxWidth = width * scaleX;
+        const boxHeight = (ascent + descent) * scaleY;
 
         this.textPositions.push({
             text,
-            x: tm[4],
-            y: tm[5],
-            width: scaledWidth,
-            height: fontSize * Math.abs(tm[3]),
-            fontSize
+            x: pageX,
+            y: pageTop,
+            width: boxWidth,
+            height: boxHeight,
+            fontSize,
+            font: this.currentCssFont,
+            scaleX,
+            scaleY,
+            rawWidth: width
         });
 
         // Advance text position

@@ -21,7 +21,7 @@ export class StreamDecoder {
     }
 
     // Decode a stream based on its Filter(s)
-    decode(data, dict) {
+    async decode(data, dict) {
         let filter = dict.Filter;
         let decodeParms = dict.DecodeParms;
 
@@ -44,14 +44,14 @@ export class StreamDecoder {
             const filterName = filters[i];
             const parms = parmsArray[i] ? ObjectParser.getDict(parmsArray[i]) : {};
 
-            result = this.applyFilter(result, filterName, parms);
+            result = await this.applyFilter(result, filterName, parms);
         }
 
         return result;
     }
 
     // Apply a single filter
-    applyFilter(data, filterName, parms) {
+    async applyFilter(data, filterName, parms) {
         switch (filterName) {
             case 'FlateDecode':
             case 'Fl':
@@ -80,23 +80,8 @@ export class StreamDecoder {
     }
 
     // FlateDecode (zlib inflate)
-    flateDecode(data, parms) {
-        // Skip zlib header if present
-        let offset = 0;
-        if (data.length >= 2) {
-            const cmf = data[0];
-            const flg = data[1];
-            // Check for zlib header
-            if ((cmf & 0x0F) === 8 && ((cmf * 256 + flg) % 31 === 0)) {
-                offset = 2;
-                // Check for dictionary
-                if (flg & 0x20) {
-                    offset += 4;
-                }
-            }
-        }
-
-        const inflated = this.inflate(data.slice(offset));
+    async flateDecode(data, parms) {
+        const inflated = await this.inflateWithNative(data);
 
         // Apply predictor if specified
         const predictor = parms.Predictor ? ObjectParser.getNumber(parms.Predictor) : 1;
@@ -106,6 +91,54 @@ export class StreamDecoder {
         }
 
         return inflated;
+    }
+
+    async inflateWithNative(data) {
+        if (typeof process !== 'undefined' && process.versions?.node) {
+            try {
+                const zlib = await import('node:zlib');
+                return new Uint8Array(zlib.inflateSync(data));
+            } catch (err) {
+                console.warn('Node zlib inflate failed, trying browser/native fallbacks:', err);
+            }
+        }
+
+        if (typeof DecompressionStream === 'function') {
+            try {
+                return await this.inflateWithDecompressionStream(data);
+            } catch (err) {
+                console.warn('Native deflate decode failed, falling back to JS inflate:', err);
+            }
+        }
+
+        // Fall back to the original pure-JS inflater if native support is unavailable.
+        return this.inflate(this.stripZlibHeader(data));
+    }
+
+    async inflateWithDecompressionStream(data) {
+        const stream = new DecompressionStream('deflate');
+        const bufferPromise = new Response(stream.readable).arrayBuffer();
+        const writer = stream.writable.getWriter();
+        await writer.write(data);
+        await writer.close();
+        const buffer = await bufferPromise;
+        return new Uint8Array(buffer);
+    }
+
+    stripZlibHeader(data) {
+        let offset = 0;
+        if (data.length >= 2) {
+            const cmf = data[0];
+            const flg = data[1];
+            if ((cmf & 0x0F) === 8 && ((cmf * 256 + flg) % 31 === 0)) {
+                offset = 2;
+                if (flg & 0x20) {
+                    offset += 4;
+                }
+            }
+        }
+
+        return data.slice(offset);
     }
 
     // Inflate (decompress) deflate data

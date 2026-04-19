@@ -84,10 +84,13 @@ export class ObjectParser {
 
         // Check if this might be an indirect reference: num1 num2 R
         const second = this.peekToken(1);
+        if (!second || second.type !== 'number') {
+            return { type: 'number', value: first };
+        }
+
         const third = this.peekToken(2);
 
-        if (second && second.type === 'number' &&
-            third && third.type === 'keyword' && third.value === 'R') {
+        if (third && third.type === 'keyword' && third.value === 'R') {
             // It's an indirect reference
             this.nextToken(); // consume second number
             this.nextToken(); // consume R

@@ -61,6 +61,11 @@
                     <p>No document loaded</p>
                 </div>
             </div>
+            <div class="sidebar-annotations" id="sidebarAnnotations" hidden>
+                <div class="pages-empty">
+                    <p>No annotations yet</p>
+                </div>
+            </div>
 
             <div class="sidebar-footer">
                 <button class="footer-btn" id="themeToggle" title="Toggle theme">
@@ -182,6 +187,29 @@
                     </button>
                 </div>
 
+                <div class="tool-group">
+                    <button class="tool-btn" id="undoBtn" disabled title="Undo">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M9 14 4 9l5-5"/>
+                            <path d="M4 9h10a6 6 0 0 1 0 12h-1"/>
+                        </svg>
+                        <span>Undo</span>
+                    </button>
+                    <button class="tool-btn" id="redoBtn" disabled title="Redo">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="m15 14 5-5-5-5"/>
+                            <path d="M20 9H10a6 6 0 0 0 0 12h1"/>
+                        </svg>
+                        <span>Redo</span>
+                    </button>
+                    <button class="tool-btn" id="pdfThemeBtn" disabled title="Toggle PDF dark mode">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9z"/>
+                        </svg>
+                        <span>Dark PDF</span>
+                    </button>
+                </div>
+
                 <div class="color-picker" id="colorPicker">
                     <button class="color-dot active" data-color="#fbbf24" style="--color: #fbbf24"></button>
                     <button class="color-dot" data-color="#34d399" style="--color: #34d399"></button>
@@ -264,6 +292,8 @@
             </div>
             <div class="shortcuts-grid">
                 <div class="shortcut"><span class="keys"><span class="key">Ctrl</span><span class="key">O</span></span><span>Open file</span></div>
+                <div class="shortcut"><span class="keys"><span class="key">Ctrl</span><span class="key">Z</span></span><span>Undo annotation change</span></div>
+                <div class="shortcut"><span class="keys"><span class="key">Ctrl</span><span class="key">Shift</span><span class="key">Z</span></span><span>Redo annotation change</span></div>
                 <div class="shortcut"><span class="keys"><span class="key">V</span></span><span>Select tool</span></div>
                 <div class="shortcut"><span class="keys"><span class="key">H</span></span><span>Highlight tool</span></div>
                 <div class="shortcut"><span class="keys"><span class="key">N</span></span><span>Note tool</span></div>
@@ -271,6 +301,7 @@
                 <div class="shortcut"><span class="keys"><span class="key">←</span><span class="key">→</span></span><span>Navigate pages</span></div>
                 <div class="shortcut"><span class="keys"><span class="key">Ctrl</span><span class="key">+</span></span><span>Zoom in</span></div>
                 <div class="shortcut"><span class="keys"><span class="key">Ctrl</span><span class="key">-</span></span><span>Zoom out</span></div>
+                <div class="shortcut"><span class="keys"><span class="key">I</span></span><span>Toggle PDF dark mode</span></div>
                 <div class="shortcut"><span class="keys"><span class="key">T</span></span><span>Toggle theme</span></div>
                 <div class="shortcut"><span class="keys"><span class="key">Esc</span></span><span>Close modal</span></div>
             </div>

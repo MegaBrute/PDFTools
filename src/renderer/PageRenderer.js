@@ -23,6 +23,7 @@ export class PageRenderer {
     // Render a page to canvas
     async render(page, canvas) {
         const { width, height, rotate, x1, y1 } = this.pdf.getPageDimensions(page);
+        this.textRenderer.setPageMetrics({ width, height, x1, y1, rotate });
 
         // Set canvas size
         const scaledWidth = width * this.scale;
@@ -442,12 +443,32 @@ export class PageRenderer {
         const dict = imageObj.dict || ObjectParser.getDict(imageObj);
         const width = ObjectParser.getNumber(dict.Width);
         const height = ObjectParser.getNumber(dict.Height);
+        const bitsPerComponent = ObjectParser.getNumber(dict.BitsPerComponent, 8);
+        const imageData = imageObj.decodedData || imageObj.data;
+        const filterNames = this.getFilterNames(dict);
 
-        // For now, draw a placeholder rectangle
-        // Full image decoding would require handling:
-        // - Color spaces (DeviceRGB, DeviceCMYK, DeviceGray, Indexed, etc.)
-        // - Bits per component
-        // - DCTDecode (JPEG), JPXDecode (JPEG2000), etc.
+        if (await this.paintEncodedImage(ctx, imageObj, width, height, filterNames)) {
+            return;
+        }
+
+        if (width > 0 && height > 0 && bitsPerComponent === 8) {
+            const colorInfo = await this.getImageColorInfo(dict);
+            const rgba = this.buildImageRgba(imageData, width, height, colorInfo);
+
+            if (rgba) {
+                const surface = this.createRasterSurface(width, height);
+                if (surface) {
+                    surface.ctx.putImageData(new ImageData(rgba, width, height), 0, 0);
+
+                    ctx.save();
+                    ctx.scale(1 / width, -1 / height);
+                    ctx.translate(0, -height);
+                    ctx.drawImage(surface.canvas, 0, 0, width, height);
+                    ctx.restore();
+                    return;
+                }
+            }
+        }
 
         ctx.save();
         ctx.scale(1 / width, -1 / height);
@@ -459,6 +480,214 @@ export class PageRenderer {
         ctx.strokeRect(0, 0, width, height);
 
         ctx.restore();
+    }
+
+    getFilterNames(dict) {
+        if (!dict.Filter) return [];
+
+        if (dict.Filter.type === 'array') {
+            return ObjectParser.getArray(dict.Filter).map(f => ObjectParser.getName(f));
+        }
+
+        return [ObjectParser.getName(dict.Filter)];
+    }
+
+    async paintEncodedImage(ctx, imageObj, width, height, filterNames) {
+        const primaryFilter = filterNames[0];
+        if (!primaryFilter) {
+            return false;
+        }
+
+        const mimeType = primaryFilter === 'DCTDecode'
+            ? 'image/jpeg'
+            : primaryFilter === 'JPXDecode'
+                ? 'image/jp2'
+                : '';
+
+        if (!mimeType) {
+            return false;
+        }
+
+        const bitmap = await this.decodeBrowserImage(imageObj.data, mimeType);
+        if (!bitmap) {
+            return false;
+        }
+
+        ctx.save();
+        ctx.scale(1 / width, -1 / height);
+        ctx.translate(0, -height);
+        ctx.drawImage(bitmap, 0, 0, width, height);
+        ctx.restore();
+
+        if (typeof bitmap.close === 'function') {
+            bitmap.close();
+        }
+
+        return true;
+    }
+
+    async decodeBrowserImage(bytes, mimeType) {
+        if (typeof Blob === 'undefined') {
+            return null;
+        }
+
+        const blob = new Blob([bytes], { type: mimeType });
+
+        if (typeof createImageBitmap === 'function') {
+            try {
+                return await createImageBitmap(blob);
+            } catch (err) {
+                console.warn(`createImageBitmap failed for ${mimeType}:`, err);
+            }
+        }
+
+        if (typeof document === 'undefined' || typeof Image === 'undefined' || typeof URL === 'undefined') {
+            return null;
+        }
+
+        return new Promise(resolve => {
+            const url = URL.createObjectURL(blob);
+            const img = new Image();
+            img.onload = () => {
+                URL.revokeObjectURL(url);
+                resolve(img);
+            };
+            img.onerror = () => {
+                URL.revokeObjectURL(url);
+                resolve(null);
+            };
+            img.src = url;
+        });
+    }
+
+    async getImageColorInfo(dict) {
+        const colorSpace = dict.ColorSpace;
+        if (!colorSpace) {
+            return { mode: 'rgb', components: 3 };
+        }
+
+        if (colorSpace.type === 'name') {
+            const name = ObjectParser.getName(colorSpace);
+            if (name === 'DeviceGray') return { mode: 'gray', components: 1 };
+            if (name === 'DeviceCMYK') return { mode: 'cmyk', components: 4 };
+            return { mode: 'rgb', components: 3 };
+        }
+
+        if (colorSpace.type === 'array') {
+            const items = ObjectParser.getArray(colorSpace);
+            const spaceName = ObjectParser.getName(items[0]);
+
+            if (spaceName === 'ICCBased') {
+                const profile = await this.pdf.resolveRef(items[1]);
+                const profileDict = ObjectParser.getDict(profile);
+                const components = ObjectParser.getNumber(profileDict.N, 3);
+                if (components === 1) return { mode: 'gray', components };
+                if (components === 4) return { mode: 'cmyk', components };
+                return { mode: 'rgb', components };
+            }
+
+            if (spaceName === 'Indexed') {
+                const baseInfo = await this.getImageColorInfo({ ColorSpace: items[1] });
+                const lookup = await this.resolveIndexedLookup(items[3]);
+                if (lookup) {
+                    return {
+                        mode: 'indexed',
+                        components: 1,
+                        base: baseInfo,
+                        lookup
+                    };
+                }
+            }
+        }
+
+        return { mode: 'rgb', components: 3 };
+    }
+
+    async resolveIndexedLookup(lookupObj) {
+        if (!lookupObj) return null;
+
+        if (lookupObj.type === 'string') {
+            return lookupObj.value;
+        }
+
+        const lookup = await this.pdf.resolveRef(lookupObj);
+        if (lookup?.type === 'stream') {
+            return lookup.decodedData || lookup.data;
+        }
+
+        return null;
+    }
+
+    buildImageRgba(data, width, height, colorInfo) {
+        const components = colorInfo.components;
+        const expectedLength = width * height * components;
+        if (!(data instanceof Uint8Array) || data.length < expectedLength) {
+            return null;
+        }
+
+        const rgba = new Uint8ClampedArray(width * height * 4);
+        let src = 0;
+        let dst = 0;
+
+        for (let i = 0; i < width * height; i++) {
+            if (colorInfo.mode === 'gray') {
+                const g = data[src++];
+                rgba[dst++] = g;
+                rgba[dst++] = g;
+                rgba[dst++] = g;
+                rgba[dst++] = 255;
+            } else if (colorInfo.mode === 'cmyk') {
+                const c = data[src++] / 255;
+                const m = data[src++] / 255;
+                const y = data[src++] / 255;
+                const k = data[src++] / 255;
+                rgba[dst++] = Math.round(255 * (1 - c) * (1 - k));
+                rgba[dst++] = Math.round(255 * (1 - m) * (1 - k));
+                rgba[dst++] = Math.round(255 * (1 - y) * (1 - k));
+                rgba[dst++] = 255;
+            } else if (colorInfo.mode === 'indexed') {
+                const index = data[src++];
+                const baseComponents = colorInfo.base.components || 3;
+                const offset = index * baseComponents;
+                const lookup = colorInfo.lookup;
+
+                if (baseComponents === 1) {
+                    const g = lookup[offset] ?? 0;
+                    rgba[dst++] = g;
+                    rgba[dst++] = g;
+                    rgba[dst++] = g;
+                    rgba[dst++] = 255;
+                } else {
+                    rgba[dst++] = lookup[offset] ?? 0;
+                    rgba[dst++] = lookup[offset + 1] ?? 0;
+                    rgba[dst++] = lookup[offset + 2] ?? 0;
+                    rgba[dst++] = 255;
+                }
+            } else {
+                rgba[dst++] = data[src++];
+                rgba[dst++] = data[src++];
+                rgba[dst++] = data[src++];
+                rgba[dst++] = 255;
+            }
+        }
+
+        return rgba;
+    }
+
+    createRasterSurface(width, height) {
+        if (typeof OffscreenCanvas !== 'undefined') {
+            const canvas = new OffscreenCanvas(width, height);
+            return { canvas, ctx: canvas.getContext('2d') };
+        }
+
+        if (typeof document !== 'undefined') {
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            return { canvas, ctx: canvas.getContext('2d') };
+        }
+
+        return null;
     }
 
     // Paint a form XObject
