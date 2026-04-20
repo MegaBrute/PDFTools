@@ -22,6 +22,8 @@ export class AnnotationLayer {
         this.isDrawing = false;
         this.textPositions = [];
         this.highlighter = new Highlighter();
+        this.pageWidth = 0;
+        this.noteRail = null;
 
         this.init();
     }
@@ -31,8 +33,13 @@ export class AnnotationLayer {
         this.canvas = document.createElement('canvas');
         this.canvas.className = 'annotation-layer';
         this.pageWrapper.appendChild(this.canvas);
+        this.canvas.width = 1;
+        this.canvas.height = 1;
+        this.canvas.style.width = '0px';
+        this.canvas.style.height = '0px';
 
         this.ctx = this.canvas.getContext('2d');
+        this.noteRail = this.pageWrapper.querySelector('.page-note-rail');
 
         // Set up event listeners
         this.canvas.addEventListener('mousedown', this.handleMouseDown.bind(this));
@@ -42,12 +49,24 @@ export class AnnotationLayer {
     }
 
     // Set canvas size to match page
-    setSize(width, height) {
+    setSize(width, height, pageWidth = width) {
+        this.pageWidth = pageWidth;
         this.canvas.width = width;
         this.canvas.height = height;
         this.canvas.style.width = width + 'px';
         this.canvas.style.height = height + 'px';
+        this.normalizeNotePositions();
         this.render();
+    }
+
+    release() {
+        this.canvas.width = 1;
+        this.canvas.height = 1;
+        this.canvas.style.width = '0px';
+        this.canvas.style.height = '0px';
+        this.ctx = this.canvas.getContext('2d');
+        this.pageWrapper.classList.remove('has-notes');
+        this.renderNoteCards([]);
     }
 
     // Set text positions from page rendering
@@ -188,7 +207,7 @@ export class AnnotationLayer {
             const note = {
                 type: 'note',
                 color: this.activeColor,
-                x: x,
+                x: this.getNoteX(),
                 y: y,
                 text: '',
                 pageIndex: this.pageIndex,
@@ -227,8 +246,9 @@ export class AnnotationLayer {
             if (type && ann.type !== type) continue;
 
             if (ann.type === 'note') {
+                const noteX = this.getNoteXForAnnotation(ann);
                 // Note icon hit test (24x24)
-                if (x >= ann.x - 12 && x <= ann.x + 12 &&
+                if (x >= noteX - 12 && x <= noteX + 12 &&
                     y >= ann.y - 12 && y <= ann.y + 12) {
                     return ann;
                 }
@@ -288,6 +308,9 @@ export class AnnotationLayer {
 
     // Add annotation
     addAnnotation(annotation, options = {}) {
+        if (annotation.type === 'note') {
+            annotation.x = this.getNoteX();
+        }
         this.annotations.push(annotation);
         if (!options.silent) {
             this.dispatchAnnotationEvent('add', annotation);
@@ -305,6 +328,9 @@ export class AnnotationLayer {
         const index = this.annotations.findIndex(item => item.id === annotation.id);
         if (index === -1) return null;
 
+        if (annotation.type === 'note') {
+            annotation.x = this.getNoteX();
+        }
         const previousAnnotation = this.annotations[index];
         this.annotations[index] = annotation;
 
@@ -328,15 +354,22 @@ export class AnnotationLayer {
         return this.annotations;
     }
 
+    hasNotes() {
+        return this.annotations.some(annotation => annotation.type === 'note');
+    }
+
     // Set annotations (for loading)
     setAnnotations(annotations) {
         this.annotations = annotations.filter(a => a.pageIndex === this.pageIndex);
+        this.normalizeNotePositions();
         this.render();
     }
 
     // Render all annotations
     render() {
+        this.pageWrapper.classList.toggle('has-notes', this.hasNotes());
         this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+        this.renderNoteCards(this.annotations.filter(annotation => annotation.type === 'note'));
 
         for (const ann of this.annotations) {
             switch (ann.type) {
@@ -344,7 +377,6 @@ export class AnnotationLayer {
                     this.renderHighlight(ann);
                     break;
                 case 'note':
-                    this.renderNote(ann);
                     break;
                 case 'drawing':
                     this.renderDrawing(ann);
@@ -360,48 +392,6 @@ export class AnnotationLayer {
         for (const rect of rects) {
             this.ctx.fillRect(rect.x, rect.y, rect.width, rect.height);
         }
-    }
-
-    // Render note annotation
-    renderNote(ann) {
-        // Draw note icon
-        this.ctx.fillStyle = ann.color;
-        this.ctx.beginPath();
-
-        // Simple note icon shape
-        const x = ann.x;
-        const y = ann.y;
-        const size = 20;
-
-        this.ctx.moveTo(x - size/2, y - size/2);
-        this.ctx.lineTo(x + size/2, y - size/2);
-        this.ctx.lineTo(x + size/2, y + size/4);
-        this.ctx.lineTo(x + size/4, y + size/2);
-        this.ctx.lineTo(x - size/2, y + size/2);
-        this.ctx.closePath();
-
-        this.ctx.fill();
-
-        // Folded corner
-        this.ctx.fillStyle = this.adjustColor(ann.color, -30);
-        this.ctx.beginPath();
-        this.ctx.moveTo(x + size/2, y + size/4);
-        this.ctx.lineTo(x + size/4, y + size/4);
-        this.ctx.lineTo(x + size/4, y + size/2);
-        this.ctx.closePath();
-        this.ctx.fill();
-
-        // Border
-        this.ctx.strokeStyle = this.adjustColor(ann.color, -50);
-        this.ctx.lineWidth = 1;
-        this.ctx.beginPath();
-        this.ctx.moveTo(x - size/2, y - size/2);
-        this.ctx.lineTo(x + size/2, y - size/2);
-        this.ctx.lineTo(x + size/2, y + size/4);
-        this.ctx.lineTo(x + size/4, y + size/2);
-        this.ctx.lineTo(x - size/2, y + size/2);
-        this.ctx.closePath();
-        this.ctx.stroke();
     }
 
     // Render drawing annotation
@@ -443,8 +433,15 @@ export class AnnotationLayer {
                     ann.rect.y *= factor;
                     ann.rect.width *= factor;
                     ann.rect.height *= factor;
+                    if (ann.rects?.length) {
+                        ann.rects = ann.rects.map(rect => ({
+                            x: rect.x * factor,
+                            y: rect.y * factor,
+                            width: rect.width * factor,
+                            height: rect.height * factor
+                        }));
+                    }
                 } else if (ann.type === 'note') {
-                    ann.x *= factor;
                     ann.y *= factor;
                 } else if (ann.type === 'drawing') {
                     ann.path = ann.path.map(point => ({
@@ -456,6 +453,54 @@ export class AnnotationLayer {
         }
 
         this.scale = scale;
+        this.normalizeNotePositions();
         this.render();
+    }
+
+    getNoteX() {
+        if (!this.canvas.width || !this.pageWidth) return 0;
+        return this.pageWidth + Math.max(12, (this.canvas.width - this.pageWidth) / 2);
+    }
+
+    getNoteXForAnnotation(ann) {
+        if (!this.pageWidth) return ann.x;
+        return this.getNoteX();
+    }
+
+    renderNoteCards(notes) {
+        if (!this.noteRail) return;
+
+        this.noteRail.replaceChildren();
+
+        for (const ann of notes) {
+            const card = document.createElement('button');
+            card.type = 'button';
+            card.className = 'note-rail-card';
+            card.style.top = `${Math.max(8, Math.min(this.canvas.height - 88, ann.y - 18))}px`;
+            card.style.setProperty('--note-accent', ann.color || '#fbbf24');
+            card.onclick = () => this.openNoteEditor(ann);
+
+            const title = document.createElement('div');
+            title.className = 'note-rail-title';
+            title.textContent = ann.text?.trim() ? 'Note' : 'Empty note';
+
+            const body = document.createElement('div');
+            body.className = 'note-rail-body';
+            body.textContent = ann.text?.trim() || 'Click to add your note.';
+
+            card.appendChild(title);
+            card.appendChild(body);
+            this.noteRail.appendChild(card);
+        }
+    }
+
+    normalizeNotePositions() {
+        if (!this.pageWidth || !this.canvas.height) return;
+
+        for (const ann of this.annotations) {
+            if (ann.type !== 'note') continue;
+            ann.x = this.getNoteX();
+            ann.y = Math.max(16, Math.min(this.canvas.height - 16, ann.y));
+        }
     }
 }

@@ -17,6 +17,10 @@ GlobalWorkerOptions.workerSrc = new URL(
 const CMAP_URL = new URL('../node_modules/pdfjs-dist/cmaps/', import.meta.url).toString();
 const STANDARD_FONT_URL = new URL('../node_modules/pdfjs-dist/standard_fonts/', import.meta.url).toString();
 const WASM_URL = new URL('../node_modules/pdfjs-dist/wasm/', import.meta.url).toString();
+const NOTE_RAIL_WIDTH = 196;
+const PAGE_RENDER_BUFFER = 2;
+const PAGE_RELEASE_BUFFER = 6;
+const THUMBNAIL_ROOT_MARGIN = '320px 0px';
 
 class App {
     constructor() {
@@ -40,6 +44,10 @@ class App {
         this.isApplyingHistory = false;
         this.currentNote = null;
         this.currentNoteOriginal = null;
+        this.thumbnailViews = [];
+        this.thumbnailObserver = null;
+        this.pendingPageRenderFrame = null;
+        this.pendingScrollFrame = null;
 
         this.init();
     }
@@ -206,7 +214,7 @@ class App {
             }
         };
 
-        viewer.onscroll = () => this.updateCurrentPage();
+        viewer.onscroll = () => this.handleViewerScroll();
     }
 
     openPdfPicker() {
@@ -260,6 +268,7 @@ class App {
             this.pageElements = [];
             this.pageViews = [];
             this.annotationLayers = [];
+            this.thumbnailViews = [];
             this.undoStack = [];
             this.redoStack = [];
             this.currentNote = null;
@@ -279,7 +288,7 @@ class App {
             this.renderAnnotationList();
             this.goToPage(0);
 
-            this.renderPagesProgressively(this.renderSessionId);
+            this.queueVisiblePageRendering();
             this.renderThumbnailsProgressively(this.renderSessionId);
 
             this.toast(`Loaded ${this.pages.length} pages`, 'success');
@@ -298,6 +307,8 @@ class App {
     async destroyCurrentDocument() {
         const currentLoadingTask = this.loadingTask;
         this.loadingTask = null;
+        this.disconnectThumbnailObserver();
+        this.thumbnailViews = [];
 
         if (currentLoadingTask) {
             try {
@@ -327,9 +338,15 @@ class App {
 
             const content = document.createElement('div');
             content.className = 'page-content';
+            content.style.width = `${width}px`;
+            content.style.height = `${height}px`;
 
             const canvas = document.createElement('canvas');
             canvas.className = 'page-canvas';
+            canvas.width = 1;
+            canvas.height = 1;
+            canvas.style.width = '0px';
+            canvas.style.height = '0px';
             content.appendChild(canvas);
 
             const textLayer = document.createElement('div');
@@ -341,10 +358,15 @@ class App {
 
             wrapper.appendChild(content);
 
+            const noteRail = document.createElement('div');
+            noteRail.className = 'page-note-rail';
+            noteRail.style.width = `${NOTE_RAIL_WIDTH}px`;
+            noteRail.style.height = `${height}px`;
+            wrapper.appendChild(noteRail);
+
             container.appendChild(wrapper);
 
             const layer = new AnnotationLayer(wrapper, i, this.scale);
-            layer.setSize(width, height);
             layer.setTool(this.tool);
             layer.setColor(this.color);
 
@@ -354,12 +376,11 @@ class App {
                 content,
                 canvas,
                 textLayer,
-                preview: null,
+                noteRail,
                 renderTask: null,
                 textLayerTask: null,
-                renderedWidth: width,
-                renderedHeight: height,
-                renderedScale: this.scale
+                renderKey: null,
+                renderingKey: null
             });
             this.annotationLayers.push(layer);
         }
@@ -375,7 +396,9 @@ class App {
     }
 
     async renderPagesProgressively(sessionId) {
-        for (let i = 0; i < this.pages.length; i++) {
+        const { start, end } = this.getPageRenderWindow();
+
+        for (let i = start; i <= end; i++) {
             if (sessionId !== this.renderSessionId) return;
 
             try {
@@ -390,6 +413,8 @@ class App {
 
             await this.nextFrame();
         }
+
+        this.releaseFarPageViews();
     }
 
     getPdfPageColors() {
@@ -479,66 +504,12 @@ class App {
         targetContext.clearRect(0, 0, view.canvas.width, view.canvas.height);
         targetContext.drawImage(sourceCanvas, 0, 0);
 
-        view.wrapper.style.width = `${viewport.width}px`;
         view.wrapper.style.height = `${viewport.height}px`;
         view.content.style.width = `${viewport.width}px`;
         view.content.style.height = `${viewport.height}px`;
-    }
-
-    prepareZoomAnimation(targetScale) {
-        const factor = targetScale / this.scale;
-        if (!Number.isFinite(factor) || factor === 1) return;
-
-        for (let i = 0; i < this.pageViews.length; i++) {
-            const view = this.pageViews[i];
-            if (!view?.renderedWidth || !view?.renderedHeight) continue;
-
-            const targetWidth = view.renderedWidth * factor;
-            const targetHeight = view.renderedHeight * factor;
-
-            const preview = document.createElement('canvas');
-            preview.className = 'page-preview';
-            preview.width = view.canvas.width;
-            preview.height = view.canvas.height;
-            preview.style.width = `${view.renderedWidth}px`;
-            preview.style.height = `${view.renderedHeight}px`;
-
-            const previewContext = preview.getContext('2d', { alpha: false });
-            previewContext.setTransform(1, 0, 0, 1, 0, 0);
-            previewContext.clearRect(0, 0, preview.width, preview.height);
-            previewContext.drawImage(view.canvas, 0, 0);
-
-            const annotationCanvas = this.annotationLayers[i]?.canvas;
-            if (annotationCanvas?.width && annotationCanvas?.height) {
-                previewContext.save();
-                previewContext.scale(
-                    preview.width / annotationCanvas.width,
-                    preview.height / annotationCanvas.height
-                );
-                previewContext.drawImage(annotationCanvas, 0, 0);
-                previewContext.restore();
-            }
-
-            view.preview?.remove();
-            view.preview = preview;
-            view.wrapper.appendChild(preview);
-
-            view.wrapper.style.width = `${targetWidth}px`;
-            view.wrapper.style.height = `${targetHeight}px`;
-            view.content.style.visibility = 'hidden';
-            preview.getBoundingClientRect();
-            preview.style.transform = `scale(${factor})`;
-        }
-    }
-
-    finishZoomPreview(pageIndex) {
-        const view = this.pageViews[pageIndex];
-        if (!view) return;
-
-        view.content.style.visibility = 'visible';
-        if (view.preview) {
-            view.preview.remove();
-            view.preview = null;
+        if (view.noteRail) {
+            view.noteRail.style.width = `${NOTE_RAIL_WIDTH}px`;
+            view.noteRail.style.height = `${viewport.height}px`;
         }
     }
 
@@ -546,99 +517,121 @@ class App {
         const view = this.pageViews[pageIndex];
         if (!view || sessionId !== this.renderSessionId) return;
 
-        const page = await this.getPdfPage(this.pages[pageIndex]);
-        if (sessionId !== this.renderSessionId) return;
+        const renderKey = this.getPageRenderKey(pageIndex);
+        if (view.renderKey === renderKey || view.renderingKey === renderKey) return;
+        view.renderingKey = renderKey;
 
-        const viewport = page.getViewport({ scale: this.scale });
-        const outputScale = window.devicePixelRatio || 1;
-
-        view.renderTask?.cancel();
-        view.textLayerTask?.cancel?.();
-        const renderWidth = Math.ceil(viewport.width * outputScale);
-        const renderHeight = Math.ceil(viewport.height * outputScale);
-
-        if (this.pdfDarkMode) {
-            const originalCanvas = this.createRenderCanvas(renderWidth, renderHeight);
-            await this.renderPageBitmap(page, viewport, outputScale, originalCanvas);
+        try {
+            const page = await this.getPdfPage(this.pages[pageIndex]);
             if (sessionId !== this.renderSessionId) return;
 
-            const darkCanvas = this.createRenderCanvas(renderWidth, renderHeight);
-            const darkContext = darkCanvas.getContext('2d', { alpha: false });
-            view.renderTask = page.render({
-                canvasContext: darkContext,
-                viewport,
-                transform: this.getRenderTransform(outputScale),
-                pageColors: this.getPdfPageColors(),
-                recordImages: true
+            const viewport = page.getViewport({ scale: this.scale });
+            const outputScale = window.devicePixelRatio || 1;
+
+            view.renderTask?.cancel();
+            view.textLayerTask?.cancel?.();
+            const renderWidth = Math.ceil(viewport.width * outputScale);
+            const renderHeight = Math.ceil(viewport.height * outputScale);
+
+            if (this.pdfDarkMode) {
+                const originalCanvas = this.createRenderCanvas(renderWidth, renderHeight);
+                await this.renderPageBitmap(page, viewport, outputScale, originalCanvas);
+                if (sessionId !== this.renderSessionId) return;
+
+                const darkCanvas = this.createRenderCanvas(renderWidth, renderHeight);
+                const darkContext = darkCanvas.getContext('2d', { alpha: false });
+                view.renderTask = page.render({
+                    canvasContext: darkContext,
+                    viewport,
+                    transform: this.getRenderTransform(outputScale),
+                    pageColors: this.getPdfPageColors(),
+                    recordImages: true
+                });
+
+                await view.renderTask.promise;
+
+                if (sessionId !== this.renderSessionId) return;
+
+                this.restoreImageRegions(darkCanvas, originalCanvas, view.renderTask.imageCoordinates);
+                this.commitRenderedCanvas(view, darkCanvas, viewport);
+            } else {
+                const renderCanvas = this.createRenderCanvas(renderWidth, renderHeight);
+                const renderContext = renderCanvas.getContext('2d', { alpha: false });
+                view.renderTask = page.render({
+                    canvasContext: renderContext,
+                    viewport,
+                    transform: this.getRenderTransform(outputScale)
+                });
+
+                await view.renderTask.promise;
+                if (sessionId !== this.renderSessionId) return;
+
+                this.commitRenderedCanvas(view, renderCanvas, viewport);
+            }
+
+            if (sessionId !== this.renderSessionId) return;
+
+            view.textLayer.replaceChildren();
+            view.textLayer.style.setProperty('--total-scale-factor', viewport.scale);
+            const textLayerTask = new TextLayer({
+                textContentSource: page.streamTextContent({
+                    includeMarkedContent: true,
+                    disableNormalization: true
+                }),
+                container: view.textLayer,
+                viewport
             });
+            view.textLayerTask = textLayerTask;
 
-            await view.renderTask.promise;
+            await textLayerTask.render();
 
-            if (sessionId !== this.renderSessionId) return;
+            if (sessionId !== this.renderSessionId || view.textLayerTask !== textLayerTask) return;
 
-            this.restoreImageRegions(darkCanvas, originalCanvas, view.renderTask.imageCoordinates);
-            this.commitRenderedCanvas(view, darkCanvas, viewport);
-        } else {
-            const renderCanvas = this.createRenderCanvas(renderWidth, renderHeight);
-            const renderContext = renderCanvas.getContext('2d', { alpha: false });
-            view.renderTask = page.render({
-                canvasContext: renderContext,
-                viewport,
-                transform: this.getRenderTransform(outputScale)
-            });
+            const endOfContent = document.createElement('div');
+            endOfContent.className = 'endOfContent';
+            view.textLayer.appendChild(endOfContent);
 
-            await view.renderTask.promise;
-            if (sessionId !== this.renderSessionId) return;
+            await this.nextFrame();
 
-            this.commitRenderedCanvas(view, renderCanvas, viewport);
+            view.content.style.visibility = 'visible';
+
+            const textPositions = this.extractTextPositions(pageIndex);
+            this.annotationLayers[pageIndex]?.setScale(this.scale);
+            this.annotationLayers[pageIndex]?.setSize(viewport.width + NOTE_RAIL_WIDTH, viewport.height, viewport.width);
+            this.annotationLayers[pageIndex]?.setTextPositions(textPositions);
+            this.syncPageNoteRail(pageIndex);
+            view.renderKey = renderKey;
+        } finally {
+            if (view.renderingKey === renderKey) {
+                view.renderingKey = null;
+            }
         }
-
-        if (sessionId !== this.renderSessionId) return;
-
-        view.textLayer.replaceChildren();
-        view.textLayer.style.setProperty('--total-scale-factor', viewport.scale);
-        const textLayerTask = new TextLayer({
-            textContentSource: page.streamTextContent({
-                includeMarkedContent: true,
-                disableNormalization: true
-            }),
-            container: view.textLayer,
-            viewport
-        });
-        view.textLayerTask = textLayerTask;
-
-        await textLayerTask.render();
-
-        if (sessionId !== this.renderSessionId || view.textLayerTask !== textLayerTask) return;
-
-        const endOfContent = document.createElement('div');
-        endOfContent.className = 'endOfContent';
-        view.textLayer.appendChild(endOfContent);
-
-        await this.nextFrame();
-
-        this.finishZoomPreview(pageIndex);
-        view.renderedWidth = viewport.width;
-        view.renderedHeight = viewport.height;
-        view.renderedScale = this.scale;
-
-        const textPositions = this.extractTextPositions(pageIndex);
-        this.annotationLayers[pageIndex]?.setScale(this.scale);
-        this.annotationLayers[pageIndex]?.setSize(viewport.width, viewport.height);
-        this.annotationLayers[pageIndex]?.setTextPositions(textPositions);
     }
 
     async renderThumbnailsProgressively(sessionId) {
         const container = document.getElementById('sidebarPages');
+        this.disconnectThumbnailObserver();
         container.innerHTML = '';
 
         if (!this.pages.length) {
             container.innerHTML = '<div class="pages-empty"><p>No document loaded</p></div>';
             return;
         }
+        this.thumbnailViews = [];
 
-        const maxThumbWidth = Math.max(120, container.clientWidth - 28);
-        const outputScale = Math.min(4, (window.devicePixelRatio || 1) * 2);
+        this.thumbnailObserver = new IntersectionObserver(entries => {
+            for (const entry of entries) {
+                if (!entry.isIntersecting) continue;
+                const pageIndex = Number(entry.target.dataset.page);
+                if (Number.isFinite(pageIndex)) {
+                    this.requestThumbnailRender(pageIndex, sessionId);
+                }
+            }
+        }, {
+            root: container,
+            rootMargin: THUMBNAIL_ROOT_MARGIN,
+            threshold: 0.01
+        });
 
         for (let i = 0; i < this.pages.length; i++) {
             if (sessionId !== this.renderSessionId) return;
@@ -657,62 +650,18 @@ class App {
             thumb.appendChild(canvas);
             thumb.appendChild(label);
             container.appendChild(thumb);
-
-            try {
-                const page = await this.getPdfPage(this.pages[i]);
-                const baseViewport = page.getViewport({ scale: 1 });
-                const thumbScale = Math.min(0.35, maxThumbWidth / baseViewport.width);
-                const viewport = page.getViewport({ scale: thumbScale });
-                const renderWidth = Math.ceil(viewport.width * outputScale);
-                const renderHeight = Math.ceil(viewport.height * outputScale);
-
-                canvas.width = renderWidth;
-                canvas.height = renderHeight;
-                canvas.style.width = '100%';
-                canvas.style.height = 'auto';
-
-                if (this.pdfDarkMode) {
-                    const originalCanvas = this.createRenderCanvas(renderWidth, renderHeight);
-                    await this.renderPageBitmap(page, viewport, outputScale, originalCanvas);
-                    if (sessionId !== this.renderSessionId) return;
-
-                    const darkCanvas = this.createRenderCanvas(renderWidth, renderHeight);
-                    const darkContext = darkCanvas.getContext('2d', { alpha: false });
-                    const renderTask = page.render({
-                        canvasContext: darkContext,
-                        viewport,
-                        transform: this.getRenderTransform(outputScale),
-                        pageColors: this.getPdfPageColors(),
-                        recordImages: true
-                    });
-
-                    await renderTask.promise;
-                    if (sessionId !== this.renderSessionId) return;
-
-                    this.restoreImageRegions(darkCanvas, originalCanvas, renderTask.imageCoordinates);
-                    const context = canvas.getContext('2d', { alpha: false });
-                    context.setTransform(1, 0, 0, 1, 0, 0);
-                    context.clearRect(0, 0, canvas.width, canvas.height);
-                    context.drawImage(darkCanvas, 0, 0);
-                } else {
-                    const context = canvas.getContext('2d', { alpha: false });
-                    context.setTransform(1, 0, 0, 1, 0, 0);
-                    context.clearRect(0, 0, canvas.width, canvas.height);
-
-                    await page.render({
-                        canvasContext: context,
-                        viewport,
-                        transform: this.getRenderTransform(outputScale)
-                    }).promise;
-                }
-            } catch (err) {
-                if (err?.name === 'RenderingCancelledException') return;
-                console.error(`Failed to render thumbnail ${i + 1}:`, err);
-            }
-
             thumb.classList.toggle('active', i === this.currentPage);
-            await this.nextFrame();
+            this.thumbnailViews.push({
+                pageIndex: i,
+                element: thumb,
+                canvas,
+                renderedKey: null,
+                renderingKey: null
+            });
+            this.thumbnailObserver.observe(thumb);
         }
+
+        this.requestThumbnailRender(this.currentPage, sessionId);
     }
 
     extractTextPositions(pageIndex) {
@@ -833,19 +782,200 @@ class App {
             if (view.textLayer) {
                 view.textLayer.replaceChildren();
             }
-            this.finishZoomPreview(this.pageViews.indexOf(view));
+            if (view.content) {
+                view.content.style.visibility = 'visible';
+            }
         }
+    }
+
+    handleViewerScroll() {
+        if (this.pendingScrollFrame) return;
+
+        this.pendingScrollFrame = requestAnimationFrame(() => {
+            this.pendingScrollFrame = null;
+            this.updateCurrentPage();
+            this.queueVisiblePageRendering();
+        });
+    }
+
+    getPageRenderKey(pageIndex) {
+        return `${pageIndex}:${this.scale}:${this.pdfDarkMode ? 'dark' : 'light'}`;
+    }
+
+    getThumbnailRenderKey(pageIndex, maxThumbWidth) {
+        return `${pageIndex}:${this.pdfDarkMode ? 'dark' : 'light'}:${Math.round(maxThumbWidth)}`;
+    }
+
+    getPageRenderWindow() {
+        const center = Math.max(0, Math.min(this.currentPage, this.pages.length - 1));
+        return {
+            start: Math.max(0, center - PAGE_RENDER_BUFFER),
+            end: Math.min(this.pages.length - 1, center + PAGE_RENDER_BUFFER)
+        };
+    }
+
+    queueVisiblePageRendering() {
+        if (!this.pdf) return;
+
+        if (this.pendingPageRenderFrame) {
+            cancelAnimationFrame(this.pendingPageRenderFrame);
+        }
+
+        const sessionId = this.renderSessionId;
+        this.pendingPageRenderFrame = requestAnimationFrame(() => {
+            this.pendingPageRenderFrame = null;
+            this.renderPagesProgressively(sessionId);
+        });
+    }
+
+    releasePageView(pageIndex) {
+        const view = this.pageViews[pageIndex];
+        if (!view) return;
+
+        view.renderTask?.cancel();
+        view.textLayerTask?.cancel?.();
+        view.textLayer.replaceChildren();
+        view.canvas.width = 0;
+        view.canvas.height = 0;
+        view.canvas.style.width = '0px';
+        view.canvas.style.height = '0px';
+        view.renderKey = null;
+        view.renderingKey = null;
+        this.annotationLayers[pageIndex]?.release();
+        this.syncPageNoteRail(pageIndex);
+    }
+
+    releaseFarPageViews() {
+        const center = Math.max(0, Math.min(this.currentPage, this.pages.length - 1));
+        const keepStart = Math.max(0, center - PAGE_RELEASE_BUFFER);
+        const keepEnd = Math.min(this.pages.length - 1, center + PAGE_RELEASE_BUFFER);
+
+        for (let i = 0; i < this.pageViews.length; i++) {
+            if (i < keepStart || i > keepEnd) {
+                this.releasePageView(i);
+            }
+        }
+    }
+
+    disconnectThumbnailObserver() {
+        this.thumbnailObserver?.disconnect();
+        this.thumbnailObserver = null;
+    }
+
+    async requestThumbnailRender(pageIndex, sessionId = this.renderSessionId) {
+        const thumbView = this.thumbnailViews[pageIndex];
+        const container = document.getElementById('sidebarPages');
+        if (!thumbView || !container || sessionId !== this.renderSessionId) return;
+
+        const maxThumbWidth = Math.max(140, thumbView.element.clientWidth - 12);
+        const renderKey = this.getThumbnailRenderKey(pageIndex, maxThumbWidth);
+        if (thumbView.renderedKey === renderKey || thumbView.renderingKey === renderKey) return;
+        thumbView.renderingKey = renderKey;
+
+        try {
+            const page = await this.getPdfPage(this.pages[pageIndex]);
+            if (sessionId !== this.renderSessionId) return;
+
+            const baseViewport = page.getViewport({ scale: 1 });
+            const thumbScale = Math.min(0.5, maxThumbWidth / baseViewport.width);
+            const viewport = page.getViewport({ scale: thumbScale });
+            const outputScale = Math.min(4, (window.devicePixelRatio || 1) * 2);
+            const renderWidth = Math.ceil(viewport.width * outputScale);
+            const renderHeight = Math.ceil(viewport.height * outputScale);
+            const canvas = thumbView.canvas;
+
+            canvas.width = renderWidth;
+            canvas.height = renderHeight;
+            canvas.style.width = '100%';
+            canvas.style.height = 'auto';
+
+            if (this.pdfDarkMode) {
+                const originalCanvas = this.createRenderCanvas(renderWidth, renderHeight);
+                await this.renderPageBitmap(page, viewport, outputScale, originalCanvas);
+                if (sessionId !== this.renderSessionId) return;
+
+                const darkCanvas = this.createRenderCanvas(renderWidth, renderHeight);
+                const darkContext = darkCanvas.getContext('2d', { alpha: false });
+                const renderTask = page.render({
+                    canvasContext: darkContext,
+                    viewport,
+                    transform: this.getRenderTransform(outputScale),
+                    pageColors: this.getPdfPageColors(),
+                    recordImages: true
+                });
+
+                await renderTask.promise;
+                if (sessionId !== this.renderSessionId) return;
+
+                this.restoreImageRegions(darkCanvas, originalCanvas, renderTask.imageCoordinates);
+                const context = canvas.getContext('2d', { alpha: false });
+                context.setTransform(1, 0, 0, 1, 0, 0);
+                context.clearRect(0, 0, canvas.width, canvas.height);
+                context.drawImage(darkCanvas, 0, 0);
+            } else {
+                const context = canvas.getContext('2d', { alpha: false });
+                context.setTransform(1, 0, 0, 1, 0, 0);
+                context.clearRect(0, 0, canvas.width, canvas.height);
+
+                await page.render({
+                    canvasContext: context,
+                    viewport,
+                    transform: this.getRenderTransform(outputScale)
+                }).promise;
+            }
+
+            thumbView.renderedKey = renderKey;
+        } catch (err) {
+            if (err?.name === 'RenderingCancelledException' || err?.name === 'AbortException') return;
+            console.error(`Failed to render thumbnail ${pageIndex + 1}:`, err);
+        } finally {
+            if (thumbView.renderingKey === renderKey) {
+                thumbView.renderingKey = null;
+            }
+        }
+    }
+
+    syncPageNoteRail(pageIndex) {
+        const view = this.pageViews[pageIndex];
+        const layer = this.annotationLayers[pageIndex];
+        if (!view || !layer) return;
+
+        const contentWidth = parseFloat(view.content.style.width) || 0;
+        const contentHeight = parseFloat(view.content.style.height) || 0;
+        const showRail = layer.hasNotes();
+
+        if (view.noteRail) {
+            view.noteRail.hidden = !showRail;
+        }
+
+        view.wrapper.classList.toggle('has-notes', showRail);
+        view.wrapper.style.width = `${contentWidth}px`;
+        view.wrapper.style.height = `${contentHeight}px`;
     }
 
     nextFrame() {
         return new Promise(resolve => requestAnimationFrame(() => resolve()));
     }
 
+    scrollViewerToPage(index, behavior = 'smooth') {
+        const viewer = document.getElementById('viewer');
+        const target = this.pageElements[index];
+        if (!viewer || !target) return;
+
+        const targetTop = target.offsetTop - 24;
+        viewer.scrollTo({
+            top: Math.max(0, targetTop),
+            behavior
+        });
+    }
+
     goToPage(index) {
         if (index < 0 || index >= this.pages.length) return;
 
         this.currentPage = index;
-        this.pageElements[index]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        this.scrollViewerToPage(index);
+        this.queueVisiblePageRendering();
+        this.requestThumbnailRender(index);
 
         document.getElementById('pageInput').value = index + 1;
         document.getElementById('prevPage').disabled = index === 0;
@@ -868,6 +998,8 @@ class App {
             ) {
                 if (this.currentPage !== i) {
                     this.currentPage = i;
+                    this.queueVisiblePageRendering();
+                    this.requestThumbnailRender(i);
                     document.getElementById('pageInput').value = i + 1;
                     document.getElementById('prevPage').disabled = i === 0;
                     document.getElementById('nextPage').disabled = i === this.pages.length - 1;
@@ -881,7 +1013,7 @@ class App {
     }
 
     async setScale(scale) {
-        this.prepareZoomAnimation(scale);
+        const factor = scale / this.scale;
         this.scale = scale;
         document.getElementById('zoomLevel').textContent = `${Math.round(scale * 100)}%`;
 
@@ -890,10 +1022,9 @@ class App {
         this.scaleHistoryEntries(factor);
 
         this.renderSessionId += 1;
-        const sessionId = this.renderSessionId;
-
         this.cancelRenderTasks();
-        this.renderPagesProgressively(sessionId);
+        this.annotationLayers.forEach(layer => layer.setScale(scale));
+        this.queueVisiblePageRendering();
     }
 
     setTool(tool) {
@@ -943,6 +1074,8 @@ class App {
 
         if (view === 'annotations') {
             this.renderAnnotationList();
+        } else {
+            this.requestThumbnailRender(this.currentPage);
         }
     }
 
@@ -1092,12 +1225,11 @@ class App {
         if (!this.pdf) return;
 
         this.renderSessionId += 1;
-        const sessionId = this.renderSessionId;
         this.cancelRenderTasks();
-        this.renderPagesProgressively(sessionId);
+        this.queueVisiblePageRendering();
 
         if (withThumbnails) {
-            this.renderThumbnailsProgressively(sessionId);
+            this.renderThumbnailsProgressively(this.renderSessionId);
         }
     }
 
@@ -1112,8 +1244,17 @@ class App {
     openNoteEditor(note) {
         this.currentNote = this.cloneAnnotation(note);
         this.currentNoteOriginal = this.cloneAnnotation(note);
-        document.getElementById('noteText').value = note.text || '';
+        const noteText = document.getElementById('noteText');
+        noteText.value = note.text || '';
         this.showModal('noteModal');
+        requestAnimationFrame(() => {
+            try {
+                noteText.focus({ preventScroll: true });
+                noteText.setSelectionRange(noteText.value.length, noteText.value.length);
+            } catch {
+                noteText.focus();
+            }
+        });
     }
 
     saveNote() {
@@ -1305,6 +1446,11 @@ class App {
                 this.undoStack.push(entry);
                 this.redoStack = [];
             }
+        }
+
+        const pageIndex = detail.annotation?.pageIndex ?? detail.previousAnnotation?.pageIndex;
+        if (Number.isInteger(pageIndex)) {
+            this.syncPageNoteRail(pageIndex);
         }
 
         this.updateAnnotationCount();
