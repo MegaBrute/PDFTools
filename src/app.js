@@ -58,6 +58,7 @@ class App {
         this.bindEvents();
         this.setSidebarView('pages');
         this.updateHistoryButtons();
+        this.updateHighlightSelectionStyle();
     }
 
     bindEvents() {
@@ -423,7 +424,9 @@ class App {
         const styles = getComputedStyle(document.documentElement);
         return {
             background: styles.getPropertyValue('--bg-base').trim() || '#0f172a',
-            foreground: styles.getPropertyValue('--fg-default').trim() || '#f8fafc'
+            foreground: styles.getPropertyValue('--pdf-fg').trim()
+                || styles.getPropertyValue('--fg-default').trim()
+                || '#d4d4d8'
         };
     }
 
@@ -1035,6 +1038,7 @@ class App {
         });
 
         this.annotationLayers.forEach(layer => layer.setTool(tool));
+        this.updateHighlightSelectionStyle();
     }
 
     setColor(color) {
@@ -1045,6 +1049,31 @@ class App {
         });
 
         this.annotationLayers.forEach(layer => layer.setColor(color));
+        this.updateHighlightSelectionStyle();
+    }
+
+    updateHighlightSelectionStyle() {
+        document.body.classList.toggle('highlight-tool-active', this.tool === 'highlight');
+        document.documentElement.style.setProperty(
+            '--highlight-selection',
+            this.hexToRgba(this.color, 0.38)
+        );
+    }
+
+    hexToRgba(hex, alpha) {
+        const value = hex.replace('#', '');
+        const normalized = value.length === 3
+            ? value.split('').map(char => char + char).join('')
+            : value;
+        const numeric = Number.parseInt(normalized, 16);
+        if (!Number.isFinite(numeric)) {
+            return `rgba(251, 191, 36, ${alpha})`;
+        }
+
+        const r = (numeric >> 16) & 255;
+        const g = (numeric >> 8) & 255;
+        const b = numeric & 255;
+        return `rgba(${r}, ${g}, ${b}, ${alpha})`;
     }
 
     enableControls(enabled) {

@@ -6,6 +6,7 @@
     --fg-default: #111827;
     --fg-muted: #6b7280;
     --fg-subtle: #9ca3af;
+    --pdf-fg: #111827;
     --border-default: #e5e7eb;
     --border-muted: #f3f4f6;
     --accent: #2563eb;
@@ -35,6 +36,7 @@
     --fg-default: #fafafa;
     --fg-muted: #a3a3a3;
     --fg-subtle: #737373;
+    --pdf-fg: #dedee3;
     --border-default: #262626;
     --border-muted: #1f1f1f;
     --accent: #3b82f6;
@@ -758,6 +760,18 @@ body.pdf-dark .page-wrapper {
 .text-layer br::selection,
 .text-layer br::-moz-selection {
     background: transparent;
+}
+
+body.highlight-tool-active .text-layer ::selection {
+    background: var(--highlight-selection, rgba(251, 191, 36, 0.38));
+}
+
+body.highlight-tool-active .text-layer ::-moz-selection {
+    background: var(--highlight-selection, rgba(251, 191, 36, 0.38));
+}
+
+body.highlight-tool-active .text-layer .endOfContent {
+    display: none;
 }
 
 .text-layer .endOfContent {
