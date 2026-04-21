@@ -5,7 +5,8 @@
 import {
     getDocument,
     GlobalWorkerOptions,
-    TextLayer
+    TextLayer,
+    Util
 } from '../node_modules/pdfjs-dist/build/pdf.mjs';
 import { AnnotationLayer } from './annotations/AnnotationLayer.js';
 
@@ -574,13 +575,16 @@ class App {
 
             if (sessionId !== this.renderSessionId) return;
 
+            const textContent = await page.getTextContent({
+                includeMarkedContent: true,
+                disableNormalization: true
+            });
+            if (sessionId !== this.renderSessionId) return;
+
             view.textLayer.replaceChildren();
             view.textLayer.style.setProperty('--total-scale-factor', viewport.scale);
             const textLayerTask = new TextLayer({
-                textContentSource: page.streamTextContent({
-                    includeMarkedContent: true,
-                    disableNormalization: true
-                }),
+                textContentSource: textContent,
                 container: view.textLayer,
                 viewport
             });
@@ -590,6 +594,8 @@ class App {
 
             if (sessionId !== this.renderSessionId || view.textLayerTask !== textLayerTask) return;
 
+            this.indexTextLayerSpans(view);
+
             const endOfContent = document.createElement('div');
             endOfContent.className = 'endOfContent';
             view.textLayer.appendChild(endOfContent);
@@ -598,10 +604,10 @@ class App {
 
             view.content.style.visibility = 'visible';
 
-            const textPositions = this.extractTextPositions(pageIndex);
+            const textModel = this.buildTextModel(textContent, viewport);
             this.annotationLayers[pageIndex]?.setScale(this.scale);
-            this.annotationLayers[pageIndex]?.setSize(viewport.width + NOTE_RAIL_WIDTH, viewport.height, viewport.width);
-            this.annotationLayers[pageIndex]?.setTextPositions(textPositions);
+            this.annotationLayers[pageIndex]?.setTextModel(textModel);
+            this.annotationLayers[pageIndex]?.setSize(viewport.width, viewport.height, viewport.width);
             this.syncPageNoteRail(pageIndex);
             view.renderKey = renderKey;
         } finally {
@@ -693,6 +699,34 @@ class App {
             .filter(Boolean);
     }
 
+    buildTextModel(textContent, viewport) {
+        const items = [];
+        const rawItems = textContent?.items ?? [];
+
+        rawItems.forEach((item, itemIndex) => {
+            if (!item?.str) return;
+
+            const transform = Util.transform(viewport.transform, item.transform);
+            const fontHeight = Math.hypot(transform[2], transform[3]) || Math.hypot(transform[0], transform[1]) || item.height * viewport.scale;
+            const x = transform[4];
+            const y = transform[5] - fontHeight;
+            const width = Math.max(0, item.width * viewport.scale);
+            const height = Math.max(0, fontHeight);
+
+            items.push({
+                itemIndex,
+                text: item.str,
+                x,
+                y,
+                width,
+                height,
+                hasEOL: Boolean(item.hasEOL)
+            });
+        });
+
+        return { items };
+    }
+
     handleTextLayerMouseUp(pageIndex) {
         if (this.tool !== 'highlight') return;
 
@@ -706,25 +740,12 @@ class App {
         const commonNode = range.commonAncestorContainer;
         if (!view.textLayer.contains(commonNode)) return;
 
-        const wrapperRect = view.wrapper.getBoundingClientRect();
-        const textLayerRect = view.textLayer.getBoundingClientRect();
-        const rects = Array.from(range.getClientRects())
-            .filter(rect => rect.width > 1 && rect.height > 1)
-            .filter(rect =>
-                rect.bottom >= textLayerRect.top &&
-                rect.top <= textLayerRect.bottom &&
-                rect.right >= textLayerRect.left &&
-                rect.left <= textLayerRect.right
-            )
-            .map(rect => ({
-                x: rect.left - wrapperRect.left,
-                y: rect.top - wrapperRect.top,
-                width: rect.width,
-                height: rect.height
-            }));
+        const segments = this.getSelectedTextSegments(range, view.textLayer);
+        const anchorRange = this.createSelectionAnchorFromSegments(segments);
+        const rects = this.getSelectionHighlightRects(range, view, segments);
 
         const mergedRects = this.mergeHighlightRects(rects);
-        if (!mergedRects.length) return;
+        if (!mergedRects.length || !anchorRange) return;
 
         const minX = Math.min(...mergedRects.map(rect => rect.x));
         const minY = Math.min(...mergedRects.map(rect => rect.y));
@@ -737,6 +758,7 @@ class App {
             color: this.color,
             pageIndex,
             text: selection.toString().trim(),
+            anchorRange,
             rects: mergedRects,
             rect: {
                 x: minX,
@@ -747,6 +769,132 @@ class App {
         });
 
         selection.removeAllRanges();
+    }
+
+    getSelectionHighlightRects(range, view, segments = null) {
+        const wrapperRect = view.wrapper.getBoundingClientRect();
+        const textLayerRect = view.textLayer.getBoundingClientRect();
+        const preciseRects = this.getPreciseSelectionRects(range, view.textLayer, segments)
+            .filter(rect => this.isRectInsideTextLayer(rect, textLayerRect))
+            .map(rect => this.rectToWrapperSpace(rect, wrapperRect));
+
+        if (preciseRects.length) {
+            return preciseRects;
+        }
+
+        return Array.from(range.getClientRects())
+            .filter(rect => this.isRectInsideTextLayer(rect, textLayerRect))
+            .map(rect => this.rectToWrapperSpace(rect, wrapperRect));
+    }
+
+    getSelectedTextSegments(range, container) {
+        const segments = [];
+        const walker = document.createTreeWalker(
+            container,
+            NodeFilter.SHOW_TEXT,
+            {
+                acceptNode: node => node.nodeValue?.trim()
+                    ? NodeFilter.FILTER_ACCEPT
+                    : NodeFilter.FILTER_REJECT
+            }
+        );
+
+        let node = walker.nextNode();
+        while (node) {
+            if (this.rangeIntersectsTextNode(range, node)) {
+                const startOffset = node === range.startContainer ? range.startOffset : 0;
+                const endOffset = node === range.endContainer ? range.endOffset : node.nodeValue.length;
+                const span = this.getTextSpanForNode(node, container);
+                const itemIndex = Number.parseInt(span?.dataset.textItemIndex ?? '', 10);
+
+                if (endOffset > startOffset && Number.isFinite(itemIndex)) {
+                    segments.push({
+                        node,
+                        startOffset,
+                        endOffset,
+                        itemIndex
+                    });
+                }
+            }
+
+            node = walker.nextNode();
+        }
+
+        return segments;
+    }
+
+    getPreciseSelectionRects(range, container, segments = null) {
+        const rects = [];
+        const selectedSegments = segments ?? this.getSelectedTextSegments(range, container);
+
+        for (const segment of selectedSegments) {
+            const nodeRange = document.createRange();
+            nodeRange.setStart(segment.node, segment.startOffset);
+            nodeRange.setEnd(segment.node, segment.endOffset);
+            rects.push(...Array.from(nodeRange.getClientRects()));
+        }
+
+        return rects;
+    }
+
+    createSelectionAnchorFromSegments(segments) {
+        if (!segments.length) return null;
+
+        const first = segments[0];
+        const last = segments[segments.length - 1];
+        return {
+            start: {
+                itemIndex: first.itemIndex,
+                offset: first.startOffset
+            },
+            end: {
+                itemIndex: last.itemIndex,
+                offset: last.endOffset
+            }
+        };
+    }
+
+    getTextSpanForNode(node, container) {
+        if (!node) return null;
+        const element = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+        const span = element?.closest?.('span[data-text-index]');
+        return span && container.contains(span) ? span : null;
+    }
+
+    rangeIntersectsTextNode(range, node) {
+        const nodeRange = document.createRange();
+        nodeRange.selectNodeContents(node);
+
+        return range.compareBoundaryPoints(Range.END_TO_START, nodeRange) < 0
+            && range.compareBoundaryPoints(Range.START_TO_END, nodeRange) > 0;
+    }
+
+    isRectInsideTextLayer(rect, textLayerRect) {
+        return rect.width > 1
+            && rect.height > 1
+            && rect.bottom >= textLayerRect.top
+            && rect.top <= textLayerRect.bottom
+            && rect.right >= textLayerRect.left
+            && rect.left <= textLayerRect.right;
+    }
+
+    rectToWrapperSpace(rect, wrapperRect) {
+        return {
+            x: rect.left - wrapperRect.left,
+            y: rect.top - wrapperRect.top,
+            width: rect.width,
+            height: rect.height
+        };
+    }
+
+    indexTextLayerSpans(view) {
+        const spans = Array.from(view.textLayer.querySelectorAll('span'))
+            .filter(span => (span.textContent || '').trim());
+
+        spans.forEach((span, index) => {
+            span.dataset.textIndex = String(index);
+            span.dataset.textItemIndex = String(index);
+        });
     }
 
     mergeHighlightRects(rects) {
@@ -1026,7 +1174,17 @@ class App {
 
         this.renderSessionId += 1;
         this.cancelRenderTasks();
-        this.annotationLayers.forEach(layer => layer.setScale(scale));
+        const { start, end } = this.getPageRenderWindow();
+        for (let i = 0; i < this.annotationLayers.length; i++) {
+            const layer = this.annotationLayers[i];
+            if (!layer) continue;
+            if (i >= start && i <= end) {
+                layer.setScale(scale);
+            } else {
+                layer.scale = scale;
+            }
+        }
+        this.releaseFarPageViews();
         this.queueVisiblePageRendering();
     }
 
@@ -1343,11 +1501,13 @@ class App {
 
     updateAnnotationCount() {
         document.getElementById('annotationCount').textContent = this.getAllAnnotations().length;
-        this.renderAnnotationList();
+        if (this.sidebarView === 'annotations') {
+            this.renderAnnotationList();
+        }
     }
 
     saveAnnotations() {
-        const annotations = this.getAllAnnotations();
+        const annotations = this.getSerializableAnnotations();
         if (!annotations.length) {
             this.toast('No annotations to save', 'error');
             return;
@@ -1365,14 +1525,23 @@ class App {
 
     async loadAnnotations(file) {
         try {
-            const annotations = JSON.parse(await file.text());
+            const annotations = JSON.parse(await file.text()).map(annotation => this.hydrateAnnotation(annotation));
+            const groupedAnnotations = new Map();
+            annotations.forEach(annotation => {
+                if (!groupedAnnotations.has(annotation.pageIndex)) {
+                    groupedAnnotations.set(annotation.pageIndex, []);
+                }
+                groupedAnnotations.get(annotation.pageIndex).push(annotation);
+            });
+            const { start, end } = this.getPageRenderWindow();
 
             this.undoStack = [];
             this.redoStack = [];
-            this.annotationLayers.forEach(layer => layer.setAnnotations([]));
-            annotations.forEach(annotation => {
-                this.annotationLayers[annotation.pageIndex]?.addAnnotation(annotation, { silent: true });
+            this.annotationLayers.forEach((layer, pageIndex) => {
+                const shouldRender = pageIndex >= start && pageIndex <= end;
+                layer.setAnnotations(groupedAnnotations.get(pageIndex) ?? [], { render: shouldRender });
             });
+            this.releaseFarPageViews();
 
             this.updateAnnotationCount();
             this.updateHistoryButtons();
@@ -1386,6 +1555,38 @@ class App {
         return annotation ? structuredClone(annotation) : null;
     }
 
+    getSerializableAnnotations() {
+        return this.getAllAnnotations().map(annotation => {
+            const serialized = this.cloneAnnotation(annotation);
+            delete serialized?._anchorVersion;
+            if (serialized?.type === 'note') {
+                delete serialized.x;
+                if (serialized.textAnchor) {
+                    delete serialized.y;
+                }
+            }
+            if (serialized?.type === 'highlight' && serialized.anchorRange) {
+                delete serialized.rect;
+                delete serialized.rects;
+            }
+            return serialized;
+        });
+    }
+
+    hydrateAnnotation(annotation) {
+        const hydrated = this.cloneAnnotation(annotation);
+        if (hydrated?.type === 'highlight' && hydrated.anchorRange?.start && !Number.isInteger(hydrated.anchorRange.start.itemIndex)) {
+            delete hydrated.anchorRange;
+        }
+        if (hydrated?.type === 'note') {
+            delete hydrated.x;
+            if (hydrated.textAnchor && !Number.isInteger(hydrated.textAnchor.itemIndex)) {
+                delete hydrated.textAnchor;
+            }
+        }
+        return hydrated;
+    }
+
     scaleAnnotation(annotation, factor) {
         if (!annotation || !Number.isFinite(factor) || factor === 1) {
             return annotation ? this.cloneAnnotation(annotation) : null;
@@ -1394,21 +1595,24 @@ class App {
         const scaled = this.cloneAnnotation(annotation);
 
         if (scaled.type === 'highlight') {
-            scaled.rect.x *= factor;
-            scaled.rect.y *= factor;
-            scaled.rect.width *= factor;
-            scaled.rect.height *= factor;
-            if (scaled.rects?.length) {
-                scaled.rects = scaled.rects.map(rect => ({
-                    x: rect.x * factor,
-                    y: rect.y * factor,
-                    width: rect.width * factor,
-                    height: rect.height * factor
-                }));
+            if (!scaled.anchorRange) {
+                scaled.rect.x *= factor;
+                scaled.rect.y *= factor;
+                scaled.rect.width *= factor;
+                scaled.rect.height *= factor;
+                if (scaled.rects?.length) {
+                    scaled.rects = scaled.rects.map(rect => ({
+                        x: rect.x * factor,
+                        y: rect.y * factor,
+                        width: rect.width * factor,
+                        height: rect.height * factor
+                    }));
+                }
             }
         } else if (scaled.type === 'note') {
-            scaled.x *= factor;
-            scaled.y *= factor;
+            if (!scaled.textAnchor) {
+                scaled.y *= factor;
+            }
         } else if (scaled.type === 'drawing') {
             scaled.path = scaled.path.map(point => ({
                 x: point.x * factor,

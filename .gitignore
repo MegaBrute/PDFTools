@@ -1,2 +1,7 @@
-.claude/
+claude/
 node_modules/
+.tmp-chrome-*/
+.tmp-smoke-artifacts/
+.npm-*.log
+.server*.log
+debug-trace*.txt
